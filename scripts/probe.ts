@@ -115,7 +115,7 @@ export function run(canvas: HTMLCanvasElement): boolean {
     const a = body(who, -20.45, 0.0001, -13.5, Math.PI / 2), t = body('Doge', -18.9, 0.0001, -13.5);
     const wy = Math.floor(a.pos.y + a.height * 0.6);
     punch(a, t);
-    check(`P2 ${who} punches through the wall`, t.hp === 100 && t.vel.x === 0,
+    check(`P2 ${who} punch across the wall is stopped`, t.hp === 100 && t.vel.x === 0,
       `target hp ${r(t.hp, 2)}, x velocity ${r(t.vel.x, 5)}; wall block (-20, ${wy}, -14) ${isSolid(-20, wy, -14) ? 'still solid' : 'broken'}`);
     a.hide();
     t.hide();
