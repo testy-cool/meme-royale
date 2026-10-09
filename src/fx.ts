@@ -75,33 +75,14 @@ class Chunks {
         continue;
       }
       const a = i * 3;
-      v[a + 1] -= GRAVITY * this.grav[i] * dt;
-      let x = p[a] + v[a] * dt, y = p[a + 1] + v[a + 1] * dt, z = p[a + 2] + v[a + 2] * dt;
       if (this.solid) {
-        const bottom = Math.floor(y - this.size[i] / 2);
-        if (isSolid(Math.floor(x), bottom, Math.floor(z))) {
-          if (!isSolid(Math.floor(p[a]), bottom, Math.floor(p[a + 2]))) {
-            // ran into a wall sideways
-            x = p[a];
-            z = p[a + 2];
-            v[a] *= -0.3;
-            v[a + 2] *= -0.3;
-          } else if (v[a + 1] <= 0) {
-            // landed: bounce, then settle
-            y = bottom + 1 + this.size[i] / 2;
-            v[a + 1] = v[a + 1] < -3 ? -v[a + 1] * 0.35 : 0;
-            v[a] *= 0.62;
-            v[a + 2] *= 0.62;
-            for (let k = 0; k < 3; k++) w[a + k] *= 0.55;
-          } else {
-            y = p[a + 1];
-            v[a + 1] = 0;
-          }
-        }
+        // Fast chunks move in hops of at most 0.2 blocks, so a slow frame cannot carry one through the ground.
+        const hops = Math.min(16, Math.ceil((Math.hypot(v[a], v[a + 1], v[a + 2]) * dt) / 0.2)) || 1;
+        for (let h = 0; h < hops; h++) this.hop(i, dt / hops);
+      } else {
+        v[a + 1] -= GRAVITY * this.grav[i] * dt;
+        for (let k = 0; k < 3; k++) p[a + k] += v[a + k] * dt;
       }
-      p[a] = x;
-      p[a + 1] = y;
-      p[a + 2] = z;
       v1.fromArray(w, a);
       const spin = v1.length();
       q1.fromArray(q, i * 4);
@@ -112,6 +93,36 @@ class Chunks {
     this.mesh.count = this.n;
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  }
+
+  /** Moves chunk `i` for `dt` seconds and bounces it off the blocks it runs into. */
+  private hop(i: number, dt: number) {
+    const { p, v, w } = this, a = i * 3;
+    v[a + 1] -= GRAVITY * this.grav[i] * dt;
+    let x = p[a] + v[a] * dt, y = p[a + 1] + v[a + 1] * dt, z = p[a + 2] + v[a + 2] * dt;
+    const bottom = Math.floor(y - this.size[i] / 2);
+    if (isSolid(Math.floor(x), bottom, Math.floor(z))) {
+      if (!isSolid(Math.floor(p[a]), bottom, Math.floor(p[a + 2]))) {
+        // ran into a wall sideways
+        x = p[a];
+        z = p[a + 2];
+        v[a] *= -0.3;
+        v[a + 2] *= -0.3;
+      } else if (v[a + 1] <= 0) {
+        // landed: bounce, then settle
+        y = bottom + 1 + this.size[i] / 2;
+        v[a + 1] = v[a + 1] < -3 ? -v[a + 1] * 0.35 : 0;
+        v[a] *= 0.62;
+        v[a + 2] *= 0.62;
+        for (let k = 0; k < 3; k++) w[a + k] *= 0.55;
+      } else {
+        y = p[a + 1];
+        v[a + 1] = 0;
+      }
+    }
+    p[a] = x;
+    p[a + 1] = y;
+    p[a + 2] = z;
   }
 
   private remove(i: number) {
@@ -149,6 +160,7 @@ const WHITE = new THREE.Color(0xffffff), SPARK = new THREE.Color(0xfff0a8), DUST
 export class Fx {
   freeze = 0; // hit-stop: seconds the simulation stays frozen
   quiet = true; // no hit-stop or shake while the title screen shows the bots fighting
+  shakeScale = 1; // Reduce motion turns screen shake down to a quarter
   readonly focus = new THREE.Vector3(); // the player; events far from it shake less
   private trauma = 0;
   private time = 0;
@@ -286,7 +298,7 @@ export class Fx {
       f.sprite.visible = f.t < 1;
     }
     this.trauma = Math.max(0, this.trauma - dt * 2.4);
-    const s = this.trauma * this.trauma * 0.42, t = this.time * 40;
+    const s = this.trauma * this.trauma * 0.42 * this.shakeScale, t = this.time * 40;
     camera.position.x += Math.sin(t * 1.1) * s;
     camera.position.y += Math.sin(t * 1.7 + 1) * s * 0.8;
     camera.position.z += Math.cos(t * 1.3 + 2) * s;

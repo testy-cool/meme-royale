@@ -1,5 +1,5 @@
 import type { Fighter } from './fighter';
-import { startPunch } from './combat';
+import { canPunch, startPunch } from './combat';
 import { ISLAND } from './world';
 
 const AGGRO = 24; // bots pick fights with anyone this close
@@ -69,7 +69,8 @@ export class Bot {
       }
       return;
     }
-    if (t && d < REACH && Math.abs(t.pos.y - f.pos.y) < 1.5) {
+    // In reach with nothing between: stop and punch. A target behind a wall gets chased round it instead.
+    if (t && Math.abs(t.pos.y - f.pos.y) < 1.5 && canPunch(f, t, d, REACH)) {
       f.yaw = turnToward(f.yaw, facing, dt * 14);
       if (this.cooldown <= 0 && f.punchT < 0) f.windup = 1e-3;
       return;

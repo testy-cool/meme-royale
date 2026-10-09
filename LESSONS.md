@@ -21,8 +21,11 @@ The worker appends short, durable lessons here: gotchas, decisions, and deploy s
   that only `meme-royale/*` files appear, then `wrangler versions deploy <id>@100% -y`.
 - Every game update: `npm run build`, replace `public/meme-royale/` completely (file names are
   hashed), commit on the worktree branch `meme-royale`, then upload and deploy as above.
-- The `meme-royale` branch is not merged into the playground's master. A later deploy from any
-  other checkout drops `/meme-royale` until someone merges it.
+  Afterwards fast-forward master (see "Merging" below) so master matches production.
+- Before each upload, check that nobody else deployed since (`wrangler deployments list`) and
+  that the worktree's copies of the untracked runtime files still match the main checkout
+  (`cmp` each file from `git ls-files -o -i --exclude-standard src public`). If either changed,
+  re-sync before uploading, or the deploy rolls someone's work back.
 - The wrangler OAuth token that works is in `~/.wrangler/config/default.toml`.
   `~/.config/.wrangler/` holds a stale one.
 - With `routes` set, wrangler 4.103 defaults `workers_dev` to false, so deploys keep
@@ -40,7 +43,7 @@ The worker appends short, durable lessons here: gotchas, decisions, and deploy s
   `activate_tab`. Close the tab afterwards; that also releases pointer lock.
 - `npx vite preview &` records npx's PID, and killing it leaves the server running. Start
   `node_modules/.bin/vite preview` directly.
-- `window.memeRoyale` exposes fps, state, fighters, player and fx for browser checks.
+- `window.memeRoyale` exposes fps, state, fighters, player, fx and camera for browser checks.
   Setting `fx.freeze` to a large number pauses the simulation but keeps rendering, which is
   handy for posed screenshots.
 
@@ -48,8 +51,10 @@ The worker appends short, durable lessons here: gotchas, decisions, and deploy s
 - three r186 removed PCFSoftShadowMap and logs a warning. Use PCFShadowMap.
 - Chrome can report one huge mouse delta right after pointer lock engages. Ignore deltas
   over 300 px, or the camera snaps to the floor.
-- Physics runs at a fixed 120 Hz, so a 35 m/s launch moves less than half a body width per
-  step and cannot tunnel through a one-block wall.
+- Fighters step at a fixed 120 Hz, so a 35 m/s launch moves less than half a body width per
+  step and cannot tunnel through a one-block wall. M1 claimed this for all physics, but debris
+  moved once per rendered frame (up to 0.05 s) and sank into the ground. It now moves in hops
+  of at most 0.2 blocks.
 - Hit-stop on every bot-vs-bot hit made the game stutter. Full hit-stop applies only when the
   player is involved; distant bot fights get a short one or none.
 
@@ -80,3 +85,45 @@ The worker appends short, durable lessons here: gotchas, decisions, and deploy s
   `git -C /home/vlad/Work/playground-voidxd merge --ff-only meme-royale`. It writes only
   `.gitignore`, `src/gemma2-worker.ts` and `public/meme-royale/*`, none of which overlap the
   apartment edits; git aborts instead of overwriting if they ever do.
+- Vlad approved that exact command on 2026-10-10. Run it and nothing else in that checkout: no
+  stash, add, commit or checkout. Record `git status --porcelain` and a hash of `git diff` before
+  and after; both stayed identical at 24ca926 and at b423725.
+
+## M1 review fixes (2026-10-10)
+
+### Physics and combat
+- Every position change outside `stepBody` must go through `sweep()`. Fighter separation wrote
+  positions directly and nudged a body 0.03 into a wall. The next vertical resolve then "landed"
+  it on the highest block it overlapped, 2 blocks per step: onto the roof in 42 ms.
+- An axis resolver must ignore blocks the body already overlapped before the move: always when
+  moving up or down, and sideways unless the block lies ahead. Otherwise it rescues a stuck
+  body to the top or the far side of the wall.
+- Punches need line of sight. Test at chest height and at head height and accept either, so a
+  ledge underfoot does not block a punch downward. Bots use the same check before they stop
+  to punch; otherwise they stand at a wall punching a target on the other side.
+- The camera needs a box test sized to the near plane's reach (0.22 for near 0.1, fov 70,
+  2:1 aspect), never a minimum distance. A 1.5 minimum put it inside walls.
+- The punch already accepts targets up to 66 degrees off the facing, so aim assist that only
+  snaps facing would change nothing. The lock-on (20 degrees either side of the camera's aim)
+  also extends reach from 2.7 to 3.4 for the locked target, which is what lands on Nyan Cat.
+- Reduce motion scales the shake amplitude, not trauma. Amplitude grows with trauma squared,
+  so a quarter of the trauma would leave about 6% of the shake.
+- There were no FOV kicks to turn off: the FOV is a constant 70.
+
+### Probing without a browser
+- `npm run probe` replays the reviewers' reproductions in Node with the game's own modules
+  and exits 1 on any FAIL. It loads them with Vite's `runnerImport`, because the imports are
+  extensionless and Node's own type stripping cannot resolve them. A do-nothing canvas stands
+  in for the textures the modules paint when they load.
+- To show a probe catches the bug, run it against the old commit in a throwaway
+  `git worktree add --detach` with node_modules symlinked, then remove the worktree.
+- Under `vite` dev, `await import('/meme-royale/src/combat.ts')` in the page returns the same
+  module instance the game uses, so a browser check can call `canPunch` on live fighters. That
+  is how the "missed" punches in the scripted playtest turned out to be correct wall blocks.
+
+### Local servers on this machine
+- Port 4173, vite preview's default, belongs to an unrelated long-running
+  `python3 -m http.server`. Leave it alone and use `--port 4319 --strictPort`.
+- `npx wrangler dev` runs npm → sh → node → workerd. Killing the recorded npm PID leaves the
+  rest serving; kill the whole tree (`pgrep -P`).
+- `Emulation.setEmulatedMedia` with `prefers-reduced-motion` tests the reduce-motion default.

@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import type { Fighter } from './fighter';
 import type { Fx } from './fx';
-import { SLAM_COOLDOWN, slam, startPunch } from './combat';
+import { AIM_REACH, SLAM_COOLDOWN, canPunch, slam, startPunch } from './combat';
 import { clearDistance } from './world';
 
 const SENSITIVITY = 0.0024;
+const AIM_CONE = 0.35; // radians either side of the camera's aim where a punch locks on
 const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
 
 /** Keyboard and mouse control of Gigachad, plus the third-person camera. */
@@ -23,7 +24,7 @@ export class Player {
     addEventListener('keydown', (e) => {
       this.keys.add(e.code);
       if (e.code === 'KeyQ') this.wantSlam = true;
-      if (e.code === 'Space') e.preventDefault();
+      if (e.code === 'Space' && document.pointerLockElement === canvas) e.preventDefault();
     });
     addEventListener('keyup', (e) => this.keys.delete(e.code));
     addEventListener('blur', () => this.keys.clear());
@@ -47,16 +48,18 @@ export class Player {
     this.focus.copy(at);
   }
 
-  update(dt: number, now: number) {
+  update(dt: number, now: number, all: Fighter[]) {
     const f = this.f;
     this.slamCooldown = Math.max(0, this.slamCooldown - dt);
+    if (f.punchT < 0) f.aim = null;
     if (f.tumbling) this.slamPending = false;
     if (!f.alive || f.tumbling) {
       f.want.set(0, 0);
       this.wantPunch = this.wantSlam = false;
       return;
     }
-    f.yaw = this.yaw;
+    // While a locked-on punch is out, the body turns to follow its target.
+    f.yaw = f.aim ? Math.atan2(f.aim.pos.x - f.pos.x, f.aim.pos.z - f.pos.z) : this.yaw;
     const k = this.keys, ahead = +k.has('KeyW') - +k.has('KeyS'), right = +k.has('KeyD') - +k.has('KeyA');
     const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
     let mx = sin * ahead - cos * right, mz = cos * ahead + sin * right;
@@ -66,9 +69,13 @@ export class Player {
     f.want.set(mx * speed, mz * speed);
     if (k.has('Space') && f.grounded && !this.slamPending) f.vel.y = 11.5;
 
-    if (this.wantPunch && startPunch(f, now) && f.grounded) {
-      f.vel.x += sin * 3; // a small lunge into the punch
-      f.vel.z += cos * 3;
+    if (this.wantPunch && startPunch(f, now)) {
+      f.aim = this.lockOn(all);
+      if (f.aim) f.yaw = Math.atan2(f.aim.pos.x - f.pos.x, f.aim.pos.z - f.pos.z);
+      if (f.grounded) {
+        f.vel.x += Math.sin(f.yaw) * 3; // a small lunge into the punch
+        f.vel.z += Math.cos(f.yaw) * 3;
+      }
     }
     if (this.wantSlam && this.slamCooldown <= 0 && !this.slamPending) {
       this.slamPending = true;
@@ -86,6 +93,20 @@ export class Player {
         f.vel.y = Math.min(f.vel.y, -30);
       }
     }
+  }
+
+  /** Aim assist: the fighter closest to the camera's aim inside a narrow cone, within locked-on reach. */
+  private lockOn(all: Fighter[]): Fighter | null {
+    const f = this.f;
+    let best: Fighter | null = null, bestAngle = AIM_CONE;
+    for (const t of all) {
+      const dx = t.pos.x - f.pos.x, dz = t.pos.z - f.pos.z, off = Math.atan2(dx, dz) - this.yaw;
+      const angle = Math.abs(Math.atan2(Math.sin(off), Math.cos(off)));
+      if (angle >= bestAngle || !canPunch(f, t, Math.hypot(dx, dz), AIM_REACH)) continue;
+      best = t;
+      bestAngle = angle;
+    }
+    return best;
   }
 
   /** Called after each physics step: a pending slam goes off on touchdown. */

@@ -3,11 +3,13 @@ import { Fighter, PUNCH_HIT_AT, PUNCH_TIME } from './fighter';
 import { isSolid, removeBlock } from './world';
 import type { Fx } from './fx';
 
-export const STEP = 1 / 120; // physics runs at a fixed 120 Hz so fast bodies do not tunnel
+export const STEP = 1 / 120; // fighters step at a fixed 120 Hz so fast bodies do not tunnel through walls
 export const SLAM_COOLDOWN = 4;
 const GRAVITY = 30;
 const SMASH_SPEED = 8.5; // bodies faster than this break through walls instead of stopping
 const SLAM_RADIUS = 9;
+const PLAYER_REACH = 2.7;
+export const AIM_REACH = 3.4; // the player's punch locks onto a target this close inside a narrow cone
 
 const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3();
 
@@ -37,33 +39,54 @@ export function stepBody(f: Fighter, fx: Fx) {
   move(f, 2, v.z * dt, fx);
 }
 
-/** Moves along one axis and resolves overlap with blocks, Minecraft style. */
-function move(f: Fighter, axis: 0 | 1 | 2, d: number, fx: Fx) {
-  if (d === 0) return;
-  const p = f.pos, hw = f.halfW;
-  p.setComponent(axis, p.getComponent(axis) + d);
+// What the last sweep() ran into: the block face to stop at, and whether those blocks can break.
+let hitEdge = 0, hitBreakable = true;
+
+/**
+ * Moves the body `d` along one axis. Returns true when that carried it into blocks, leaving the face
+ * it crossed in `hitEdge`. A block the body already overlapped never counts when moving up or down,
+ * so a body nudged into a wall is not lifted on top of it; sideways it counts only when it lies
+ * ahead, so the body backs out of it.
+ */
+function sweep(f: Fighter, axis: 0 | 1 | 2, d: number): boolean {
+  const p = f.pos, hw = f.halfW, mid = p.getComponent(axis);
+  const lead = axis === 1 ? (d > 0 ? p.y + f.height : p.y) : mid + (d > 0 ? hw : -hw); // leading face before the move
+  p.setComponent(axis, mid + d);
   const x0 = Math.floor(p.x - hw), x1 = Math.floor(p.x + hw);
   const y0 = Math.floor(p.y), y1 = Math.floor(p.y + f.height - 1e-6);
   const z0 = Math.floor(p.z - hw), z1 = Math.floor(p.z + hw);
-  let hit = false, breakable = true, edge = d > 0 ? Infinity : -Infinity;
+  let hit = false;
+  hitBreakable = true;
+  hitEdge = d > 0 ? Infinity : -Infinity;
   for (let x = x0; x <= x1; x++)
     for (let y = y0; y <= y1; y++)
       for (let z = z0; z <= z1; z++) {
         if (!isSolid(x, y, z)) continue;
-        hit = true;
-        if (y < 0) breakable = false;
         const c = axis === 0 ? x : axis === 1 ? y : z;
-        edge = d > 0 ? Math.min(edge, c) : Math.max(edge, c + 1);
+        const overlapped = d > 0 ? c < lead - 1e-3 : c + 1 > lead + 1e-3;
+        if (overlapped && (axis === 1 || (d > 0 ? c + 0.5 < mid : c + 0.5 > mid))) continue;
+        hit = true;
+        if (y < 0) hitBreakable = false;
+        hitEdge = d > 0 ? Math.min(hitEdge, c) : Math.max(hitEdge, c + 1);
       }
-  if (!hit) return;
+  return hit;
+}
 
+/** Puts the body against the face the last sweep() ran into. */
+function stopAt(f: Fighter, axis: 0 | 1 | 2, d: number) {
+  if (axis === 1) f.pos.y = d > 0 ? hitEdge - f.height - 1e-4 : hitEdge + 1e-4;
+  else f.pos.setComponent(axis, d > 0 ? hitEdge - f.halfW - 1e-4 : hitEdge + f.halfW + 1e-4);
+}
+
+/** Moves along one axis and resolves overlap with blocks, Minecraft style. */
+function move(f: Fighter, axis: 0 | 1 | 2, d: number, fx: Fx) {
+  if (d === 0 || !sweep(f, axis, d)) return;
   const speed = Math.abs(f.vel.getComponent(axis));
-  if (breakable && speed > SMASH_SPEED && (axis !== 1 || f.tumbling)) {
+  if (hitBreakable && speed > SMASH_SPEED && (axis !== 1 || f.tumbling)) {
     smash(f, fx);
     return;
   }
-  if (axis === 1) p.y = d > 0 ? edge - f.height - 1e-4 : edge + 1e-4;
-  else p.setComponent(axis, d > 0 ? edge - hw - 1e-4 : edge + hw + 1e-4);
+  stopAt(f, axis, d);
   if (axis === 1 && d < 0) {
     f.grounded = true;
     if (speed > 13) land(f, speed, fx);
@@ -168,17 +191,41 @@ export function updatePunch(f: Fighter, all: Fighter[], fx: Fx, dt: number) {
   if (f.punchT >= PUNCH_TIME) f.punchT = -1;
 }
 
-function resolvePunch(f: Fighter, all: Fighter[], fx: Fx) {
-  const fwd = f.forward(v2), reach = f.isPlayer ? 2.7 : 1.9;
-  let best: Fighter | null = null, bestD = reach;
+/** Whether a block sits on the straight line between two points. Walls shield fighters from punches. */
+export function blockBetween(a: THREE.Vector3, b: THREE.Vector3): boolean {
+  const n = Math.ceil(a.distanceTo(b) / 0.05);
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    if (isSolid(Math.floor(a.x + (b.x - a.x) * t), Math.floor(a.y + (b.y - a.y) * t), Math.floor(a.z + (b.z - a.z) * t))) return true;
+  }
+  return false;
+}
+
+/** Whether `f`'s punch can land on `t` from `d` blocks away: close enough, roughly level, and not behind a wall. */
+export function canPunch(f: Fighter, t: Fighter, d: number, reach: number): boolean {
+  if (t === f || !t.alive || !t.root.visible || d > reach || Math.abs(t.pos.y - f.pos.y) > 1.8) return false;
+  // Clear at chest height or at head height, so a ledge underfoot does not block a punch downward.
+  const clear = (k: number) => !blockBetween(v1.copy(f.pos).setY(f.pos.y + f.height * k), v3.copy(t.pos).setY(t.pos.y + t.height * k));
+  return clear(0.5) || clear(0.85);
+}
+
+/** Who a punch lands on: the aim-assist target while it is in reach, otherwise the nearest fighter in front. */
+function punchTarget(f: Fighter, all: Fighter[], fwd: THREE.Vector3): Fighter | null {
+  const aim = f.aim;
+  if (aim && canPunch(f, aim, Math.hypot(aim.pos.x - f.pos.x, aim.pos.z - f.pos.z), AIM_REACH)) return aim;
+  let best: Fighter | null = null, bestD = f.isPlayer ? PLAYER_REACH : 1.9;
   for (const t of all) {
-    if (t === f || !t.alive || !t.root.visible) continue;
     const dx = t.pos.x - f.pos.x, dz = t.pos.z - f.pos.z, d = Math.hypot(dx, dz);
-    if (d > bestD || Math.abs(t.pos.y - f.pos.y) > 1.8) continue;
     if (d > 0.4 && (dx * fwd.x + dz * fwd.z) / d < 0.4) continue;
+    if (!canPunch(f, t, d, bestD)) continue;
     best = t;
     bestD = d;
   }
+  return best;
+}
+
+function resolvePunch(f: Fighter, all: Fighter[], fx: Fx) {
+  const fwd = f.forward(v2), best = punchTarget(f, all, fwd);
   if (!best) {
     if (f.isPlayer) punchBlock(f, fwd, fx);
     return;
@@ -256,10 +303,14 @@ export function collideFighters(all: Fighter[], fx: Fx) {
         continue;
       }
       const nx = d > 1e-4 ? dx / d : 1, nz = d > 1e-4 ? dz / d : 0, push = (min - d) / 2;
-      a.pos.x -= nx * push;
-      a.pos.z -= nz * push;
-      b.pos.x += nx * push;
-      b.pos.z += nz * push;
+      shove(a, -nx * push, -nz * push);
+      shove(b, nx * push, nz * push);
     }
   }
+}
+
+/** Pushes a body sideways, but never into a block. */
+function shove(f: Fighter, dx: number, dz: number) {
+  if (dx && sweep(f, 0, dx)) stopAt(f, 0, dx);
+  if (dz && sweep(f, 2, dz)) stopAt(f, 2, dz);
 }

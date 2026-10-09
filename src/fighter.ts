@@ -71,6 +71,7 @@ export class Fighter {
   windup = 0; // bots: > 0 while telegraphing a punch
   koTimer = -1; // >= 0 while knocked out, counts down to the respawn
   lastHitBy: Fighter | null = null;
+  aim: Fighter | null = null; // the target the player's punch is locked onto (aim assist)
   bumpImmune = 0;
   hpShownFor = 0;
   private walkPhase = 0;

@@ -50,6 +50,7 @@ playButton.addEventListener('click', () => {
     fx.quiet = false;
   }
   state = 'playing';
+  playButton.blur(); // Space is jump from here on, not another press of Play
   overlay.hidden = true;
   hud.show(true);
   lockPointer();
@@ -64,6 +65,29 @@ document.addEventListener('pointerlockchange', () => {
   state = 'paused';
   playButton.textContent = 'Resume';
   overlay.hidden = false;
+});
+
+// Reduce motion keeps hit-stop but turns screen shake down to a quarter. It starts on when the
+// system asks for less motion, and remembers the player's choice.
+const MOTION_KEY = 'meme-royale.reduce-motion';
+const motionBox = document.getElementById('reduce-motion') as HTMLInputElement;
+function savedMotion(): boolean | null {
+  try {
+    const v = localStorage.getItem(MOTION_KEY);
+    return v === null ? null : v === '1';
+  } catch {
+    return null;
+  }
+}
+motionBox.checked = savedMotion() ?? matchMedia('(prefers-reduced-motion: reduce)').matches;
+fx.shakeScale = motionBox.checked ? 0.25 : 1;
+motionBox.addEventListener('change', () => {
+  fx.shakeScale = motionBox.checked ? 0.25 : 1;
+  try {
+    localStorage.setItem(MOTION_KEY, motionBox.checked ? '1' : '0');
+  } catch {
+    // private windows can refuse storage; the setting still applies for this visit
+  }
 });
 
 function resize() {
@@ -98,7 +122,7 @@ let simTime = 0, acc = 0, trailClock = 0;
 
 function simulate(dt: number) {
   simTime += dt;
-  if (state === 'playing') player.update(dt, simTime);
+  if (state === 'playing') player.update(dt, simTime, fighters);
   for (const b of bots) b.update(dt, fighters, simTime);
   for (const f of fighters) updatePunch(f, fighters, fx, dt);
   acc += dt;
@@ -124,8 +148,8 @@ function simulate(dt: number) {
 }
 
 let last = performance.now(), orbit = 0;
-// Read by the browser checks: frame rate and the fighters.
-const debug: { fps: number; state: State; fighters: Fighter[]; player: Player; fx: Fx } = { fps: 60, state, fighters, player, fx };
+// Read by the browser checks: frame rate, the fighters and the camera.
+const debug: { fps: number; state: State; fighters: Fighter[]; player: Player; fx: Fx; camera: THREE.Camera } = { fps: 60, state, fighters, player, fx, camera };
 (window as unknown as { memeRoyale: typeof debug }).memeRoyale = debug;
 
 function frame(t: number) {

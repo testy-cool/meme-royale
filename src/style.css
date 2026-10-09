@@ -78,6 +78,24 @@ h1 {
   text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
 }
 
+.motion {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 20px;
+  font-weight: 600;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+
+.motion input {
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  accent-color: #4fae32;
+  cursor: pointer;
+}
+
 .hp {
   position: fixed;
   left: 24px;

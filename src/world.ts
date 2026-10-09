@@ -259,11 +259,18 @@ export function openSpot(): THREE.Vector3 {
   return new THREE.Vector3(0, 0, 8);
 }
 
-/** Distance the camera can back away from `from` along `dir` before entering a block. Leaves do not count. */
+/**
+ * How far the camera can back away from `from` along `dir` while its near plane stays out of blocks,
+ * however close the nearest wall is. Leaves do not count.
+ */
 export function clearDistance(from: THREE.Vector3, dir: THREE.Vector3, max: number): number {
-  for (let t = 0.3; t < max; t += 0.2) {
-    const x = Math.floor(from.x + dir.x * t), y = Math.floor(from.y + dir.y * t), z = Math.floor(from.z + dir.z * t);
-    if (isSolid(x, y, z) && !(inGrid(x, y, z) && grid[cellIndex(x, y, z)] === B.leaves)) return Math.max(1.5, t - 0.4);
+  const R = 0.22; // the near plane's corners reach this far from the camera
+  const blocks = (x: number, y: number, z: number) => isSolid(x, y, z) && !(inGrid(x, y, z) && grid[cellIndex(x, y, z)] === B.leaves);
+  for (let t = 0; t < max; t += 0.05) {
+    const px = from.x + dir.x * t, py = from.y + dir.y * t, pz = from.z + dir.z * t;
+    for (let x = Math.floor(px - R); x <= Math.floor(px + R); x++)
+      for (let y = Math.floor(py - R); y <= Math.floor(py + R); y++)
+        for (let z = Math.floor(pz - R); z <= Math.floor(pz + R); z++) if (blocks(x, y, z)) return Math.max(0, t - 0.05);
   }
   return max;
 }
