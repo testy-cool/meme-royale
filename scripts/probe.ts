@@ -1,16 +1,22 @@
-// Regression probes for the PR #3 review, run headless with `npm run probe`.
-// Each scene replays a reviewer's reproduction with the game's own functions and prints PASS or FAIL.
+// Regression probes, run headless with `npm run probe`. The M1 scenes replay the PR #3 review's
+// reproductions; the M2 scenes check the boss, the storm and the match loop, and time whole matches;
+// the last ones replay the PR #7 review's reproductions.
+// Each scene uses the game's own functions and prints PASS or FAIL.
 import * as THREE from 'three';
+import { BOSS_HEIGHT, CRUSH } from '../src/boss';
 import { BOTS, PLAYER } from '../src/cast';
-import { STEP, collideFighters, startPunch, stepBody, updatePunch } from '../src/combat';
+import { STEP, collideFighters, hurt, startPunch, stepBody, updatePunch } from '../src/combat';
 import { Fighter } from '../src/fighter';
 import { Fx } from '../src/fx';
+import { BOSS_AT, Match, describe } from '../src/match';
 import { Player } from '../src/player';
-import { buildWorld, clearDistance, isSolid } from '../src/world';
+import { STAGES } from '../src/storm';
+import { HEIGHT, ISLAND, buildWorld, clearDistance, isSolid, resetWorld } from '../src/world';
 
 const scene = new THREE.Scene();
 buildWorld(scene, 1);
 const fx = new Fx(scene);
+const village = solidCells();
 let allPassed = true;
 
 function check(name: string, ok: boolean, detail: string) {
@@ -19,6 +25,20 @@ function check(name: string, ok: boolean, detail: string) {
 }
 
 const r = (n: number, d = 4) => +n.toFixed(d);
+
+/** Every solid cell above the ground, as one string: two equal strings mean the same village. */
+function solidCells(): string {
+  const out: number[] = [];
+  for (let x = -40; x < 40; x++) for (let y = 0; y < HEIGHT; y++) for (let z = -40; z < 40; z++) if (isSolid(x, y, z)) out.push(x, y, z);
+  return out.join(',');
+}
+
+/** Solid blocks in a box of cells, inclusive. */
+function blocksIn(x0: number, x1: number, z0: number, z1: number): number {
+  let n = 0;
+  for (let x = x0; x <= x1; x++) for (let y = 0; y < HEIGHT; y++) for (let z = z0; z <= z1; z++) if (isSolid(x, y, z)) n++;
+  return n;
+}
 
 function body(name: string, x: number, y: number, z: number, yaw = 0): Fighter {
   const look = name === PLAYER.name ? PLAYER : BOTS.find((b) => b.name === name)!;
@@ -164,6 +184,402 @@ export function run(canvas: HTMLCanvasElement): boolean {
       collideFighters(both, fx);
     }
     check('Aim assist lands on a fleeing Nyan Cat', nyan.hp < 100, `Nyan Cat hp ${r(nyan.hp, 2)}`);
+    player.f.hide();
+    nyan.hide();
   }
+  m2();
+  m2Review(canvas);
   return allPassed;
+}
+
+/** Internals of the boss that a scene sets directly. */
+interface BossInside {
+  phase: string;
+  clock: number;
+  from: THREE.Vector3;
+  under(x: number, z: number, margin: number): boolean;
+  flatten(fighters: Fighter[], fx: Fx, lift: THREE.Vector3): void;
+}
+
+function m2() {
+  resetWorld();
+  const match = new Match(scene, fx, null);
+  const { boss, storm } = match;
+  const gigachad = 1.84 * PLAYER.scale;
+
+  // The boss is colossal: its model, measured, stands at least 15 times as tall as Gigachad.
+  {
+    boss.awaken(new THREE.Vector3(0, 0, 0));
+    boss.pos.y = 0;
+    boss.update(0, [], fx);
+    boss.root.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(boss.root);
+    const tall = box.max.y - box.min.y;
+    check('Boss stands at least 15x Gigachad', tall >= 15 * gigachad && BOSS_HEIGHT >= 15 * gigachad,
+      `model ${r(tall, 1)} blocks tall, ${r(box.max.x - box.min.x, 1)} wide; Gigachad ${r(gigachad, 2)}; ${r(tall / gigachad, 1)}x`);
+    boss.reset();
+  }
+
+  // Arrival: rumble, then it rises at the island's edge far from the player, with the camera beat on the way up.
+  {
+    resetWorld();
+    const you = new THREE.Vector3(20, 0, 20);
+    boss.awaken(you);
+    const spawn = boss.pos.clone().setY(0), spawnDist = Math.hypot(spawn.x - you.x, spawn.z - you.z);
+    let rumbleMax = 0, beatMax = 0, beatEnd = -1, t = 0, roseTo = NaN;
+    const log: string[] = [];
+    let last = '';
+    while (t < 14) {
+      boss.update(1 / 60, [], fx);
+      fx.update(1 / 60);
+      t += 1 / 60;
+      rumbleMax = Math.max(rumbleMax, fx.rumble);
+      const b = boss.beat();
+      beatMax = Math.max(beatMax, b);
+      if (beatMax === 1 && b === 0 && beatEnd < 0) beatEnd = t;
+      if (boss.phase !== last) log.push(`${boss.phase} at ${r(t, 2)} s`);
+      if (boss.phase === 'roar' && last !== 'roar') roseTo = boss.pos.y;
+      last = boss.phase;
+    }
+    const edge = Math.max(Math.abs(spawn.x), Math.abs(spawn.z));
+    check('Boss arrives: rumble, rise at the edge, roar', roseTo === 0 && rumbleMax > 0.7 && beatMax === 1 && beatEnd > 0 && spawnDist > 26 && edge > 18,
+      `${log.join(', ')}; rose at (${r(spawn.x, 1)}, ${r(spawn.z, 1)}), ${r(spawnDist, 1)} from the player; strongest rumble ${r(rumbleMax, 2)}; camera beat reached ${beatMax}, back to 0 at ${r(beatEnd, 2)} s`);
+    boss.reset();
+  }
+
+  // A stomp on the west house: the house is flattened, a grounded fighter nearby is thrown,
+  // a jumping one is not, one underneath is crushed, and one far away feels nothing.
+  {
+    resetWorld();
+    boss.awaken(null);
+    const b = boss as unknown as BossInside;
+    boss.pos.set(-24, 0, -13);
+    boss.yaw = Math.PI / 2;
+    b.from.set(-24, 0, -13);
+    boss.landing.set(-15, 0, -13);
+    b.phase = 'air';
+    b.clock = 0;
+    const house = blocksIn(-20, -10, -17, -10);
+    const near = body('Doge', -15, 0.0001, 1), jumper = body('Pepe', -1, 1.5, -13), under = body('Wojak', -14, 0.0001, -12), far = body('Trollface', 15, 0.0001, 20);
+    jumper.grounded = false;
+    jumper.vel.y = 8;
+    const all = [near, jumper, under, far];
+    for (let t = 0; t < 1.05; t += 1 / 60) boss.update(1 / 60, all, fx);
+    const left = blocksIn(-20, -10, -17, -10);
+    check('Stomp flattens the house it lands on', house > 150 && left === 0, `west house blocks ${house} before, ${left} after`);
+    check('Stomp throws a grounded fighter 14 blocks away', near.hp < 100 && near.vel.y > 5 && near.tumbling,
+      `Doge hp ${r(near.hp, 1)}, launched at ${r(Math.hypot(near.vel.x, near.vel.z), 1)} out and ${r(near.vel.y, 1)} up`);
+    check('A fighter in the air rides out the quake', jumper.hp === 100, `Pepe hp ${r(jumper.hp, 1)}`);
+    check('A fighter under the landing is crushed', under.hp <= 100 - CRUSH && under.vel.y > 10, `Wojak hp ${r(under.hp, 1)}, thrown ${r(under.vel.y, 1)} up`);
+    check('A fighter 37 blocks away feels nothing', far.hp === 100 && far.vel.y === 0, `Trollface hp ${far.hp}`);
+    for (const f of all) f.hide();
+    boss.reset();
+  }
+
+  // Play Again rebuilds the village exactly, puts everyone back and resets the storm and the boss.
+  {
+    const damaged = solidCells() !== village;
+    match.start();
+    const same = solidCells() === village;
+    const fresh = match.fighters.every((f) => f.alive && f.hp === 100 && f.root.visible);
+    check('Play Again rebuilds the village', damaged && same && fresh && !boss.active && storm.radius === 54 && match.time === 0,
+      `village ${damaged ? 'damaged' : 'untouched'} before, ${same ? 'identical to the original' : 'different'} after; ${match.left} fighters at full health; storm radius ${storm.radius}; boss ${boss.phase}`);
+  }
+
+  // The storm: three stages, damage outside the circle and none inside.
+  {
+    storm.reset();
+    const radii: string[] = [];
+    for (const s of STAGES) {
+      storm.update(s.end, 0);
+      radii.push(`${r(storm.radius, 1)} at ${s.end} s (${s.dps}/s)`);
+    }
+    storm.reset();
+    storm.update(STAGES[0].announce, 0);
+    storm.update(STAGES[0].end, 0);
+    match.time = STAGES[0].end;
+    const [inside, outside] = match.bots.map((b) => b.f);
+    inside.pos.set(storm.center.x, 0.0001, storm.center.y);
+    outside.pos.set(storm.center.x + storm.radius + 3, 0.0001, storm.center.y);
+    for (const f of [inside, outside]) f.grounded = true;
+    const hpIn = inside.hp, hpOut = outside.hp;
+    (match as unknown as { runHazards(dt: number): void }).runHazards(1);
+    check('Storm closes in three stages and hurts only outside', STAGES.length === 3 && inside.hp === hpIn && outside.hp < hpOut,
+      `radius ${radii.join(', ')}; inside ${r(hpIn - inside.hp, 2)} damage, outside ${r(hpOut - outside.hp, 2)} in 1 s`);
+  }
+
+  // Bots run from the storm and from the boss.
+  {
+    match.start();
+    storm.update(STAGES[0].announce, 0);
+    match.time = STAGES[0].announce;
+    const bot = match.bots[0];
+    // 6 blocks outside the next circle, on open ground on whichever side still has island under it.
+    const far = storm.safeRadius + 6;
+    const clear = (x: number, z: number) => {
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (let y = 0; y < 4; y++) if (isSolid(Math.floor(x) + dx, y, Math.floor(z) + dz)) return false;
+      return true;
+    };
+    const a = [...Array(32).keys()].map((i) => (i / 32) * Math.PI * 2).find((t) => {
+      const x = storm.safeCenter.x + Math.cos(t) * far, z = storm.safeCenter.y + Math.sin(t) * far;
+      return Math.max(Math.abs(x), Math.abs(z)) < 30 && clear(x, z);
+    })!;
+    bot.f.respawn(new THREE.Vector3(storm.safeCenter.x + Math.cos(a) * far, 0.0001, storm.safeCenter.y + Math.sin(a) * far));
+    for (const o of match.bots.slice(1)) o.f.hide();
+    const d0 = Math.hypot(bot.f.pos.x - storm.safeCenter.x, bot.f.pos.z - storm.safeCenter.y);
+    for (let t = 0; t < 3; t += 1 / 60) runBots(match, 1 / 60);
+    const d1 = Math.hypot(bot.f.pos.x - storm.safeCenter.x, bot.f.pos.z - storm.safeCenter.y);
+    check('A bot outside the next circle heads into it', d0 > storm.safeRadius && d1 < storm.safeRadius - 1,
+      `distance to the next circle's centre ${r(d0, 1)} -> ${r(d1, 1)} in 3 s (its radius ${storm.safeRadius})`);
+
+    storm.reset(); // the boss alone: nothing else to run from
+    boss.awaken(null);
+    boss.pos.set(0, 0, 0);
+    (boss as unknown as BossInside).phase = 'idle';
+    bot.f.respawn(new THREE.Vector3(14, 0.0001, 0));
+    let panicked = false;
+    for (let t = 0; t < 1.5; t += 1 / 60) {
+      runBots(match, 1 / 60);
+      panicked ||= bot.f.panic;
+    }
+    const away = Math.hypot(bot.f.pos.x, bot.f.pos.z);
+    check('A bot near the boss runs from it', away > 18 && panicked, `14 -> ${r(away, 1)} blocks from the boss in 1.5 s, arms up: ${panicked}`);
+    boss.reset();
+  }
+
+  // Kill feed wording for every way out.
+  {
+    const [a, v] = [match.bots[0].f, match.bots[1].f];
+    const lines = [
+      [() => ((v.koHow = 'hit'), (v.koBy = a)), `Doge eliminated Trollface`],
+      [() => ((v.koHow = 'fall'), (v.koBy = a)), `Doge knocked Trollface off the island`],
+      [() => ((v.koHow = 'fall'), (v.koBy = null)), `Trollface fell off the island`],
+      [() => ((v.koHow = 'storm'), (v.koBy = null)), `The storm took Trollface`],
+      [() => ((v.koHow = 'boss'), (v.koBy = 'boss')), `Skibidi Toilet flattened Trollface`],
+    ] as const;
+    const got = lines.map(([set]) => (set(), describe(v)));
+    check('Kill feed names who, and the falls, storm and boss', got.every((g, i) => g === lines[i][1]), got.join(' | '));
+  }
+
+  // Whole matches with bots only, at 60 frames a second: how long they last and how they end.
+  {
+    const runs = 8, ends: number[] = [], how: Record<string, number> = {};
+    for (let i = 0; i < runs; i++) {
+      match.start();
+      let lines: string[] = [];
+      while (!match.result && match.time < 400) {
+        match.step(1 / 60, false);
+        lines = lines.concat(match.feed.splice(0).map((l) => l.text));
+      }
+      ends.push(match.time);
+      for (const l of lines) {
+        const kind = l.includes('storm took') ? 'storm' : l.includes('Skibidi') ? 'boss' : l.includes('fell off') || l.includes('off the island') ? 'fall' : l.includes('eliminated') ? 'fight' : null;
+        if (kind) how[kind] = (how[kind] ?? 0) + 1;
+      }
+    }
+    ends.sort((x, y) => x - y);
+    const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+    const median = ends[runs >> 1];
+    check('Bot-only matches last about 3 to 5 minutes', median >= 170 && ends[ends.length - 1] <= 300 && ends[0] > BOSS_AT + 10,
+      `${runs} matches ended at ${ends.map(fmt).join(', ')}; knockouts by ${Object.entries(how).map(([k, n]) => `${k} ${n}`).join(', ')}`);
+  }
+}
+
+/** The PR #7 review's reproductions, and the frozen result its triage asked for. */
+function m2Review(canvas: HTMLCanvasElement) {
+  const you = new Player(new Fighter(PLAYER, true, scene), canvas);
+  const match = new Match(scene, fx, you);
+  const { boss, storm } = match;
+  const b = boss as unknown as BossInside;
+  const lastTwo = () => {
+    match.start();
+    const [bot, ...rest] = match.bots.map((x) => x.f);
+    for (const f of rest) {
+      f.out = true;
+      f.hide();
+    }
+    return bot;
+  };
+
+  // A stomp turned 45 degrees at (0, -11). A square scan 18 blocks out missed the tank's far corners
+  // and left 92 of 531 blocks standing (finding 1). Then 16 headings at each of three spots.
+  {
+    const footprint = () => {
+      let n = 0;
+      for (let x = -40; x < 40; x++)
+        for (let z = -40; z < 40; z++) if (b.under(x + 0.5, z + 0.5, 0.5)) for (let y = 0; y < HEIGHT; y++) if (isSolid(x, y, z)) n++;
+      return n;
+    };
+    const stomp = (x: number, z: number, yaw: number) => {
+      resetWorld();
+      boss.awaken(null);
+      boss.pos.set(x, 0, z);
+      boss.yaw = yaw;
+      const before = footprint();
+      b.flatten([], fx, new THREE.Vector3(0, 6, 0));
+      return [before, footprint()];
+    };
+    const [before, after] = stomp(0, -11, Math.PI / 4);
+    let worst = 0, worstAt = '';
+    for (const [x, z] of [[0, -11], [-14, 6], [12, 12]])
+      for (let i = 0; i < 16; i++) {
+        const left = stomp(x, z, (i / 16) * Math.PI * 2)[1];
+        if (left > worst) [worst, worstAt] = [left, ` (worst at (${x}, ${z}), ${i * 22.5} degrees)`];
+      }
+    check('A stomp turned 45 degrees flattens its whole footprint', before > 300 && after === 0 && worst === 0,
+      `at (0, -11): ${before} blocks under it before, ${after} after; 48 more stomps leave ${worst}${worstAt}`);
+    boss.reset();
+  }
+
+  // The last two, the player and a bot, go out in the same step, to the storm or off the island.
+  // The player counts as out first, so they place #2. It read "Eliminated — #1" (finding 2).
+  {
+    const got: string[] = [];
+    let ok = true;
+    for (const how of ['storm', 'fall'] as const) {
+      const bot = lastTwo();
+      storm.update(STAGES[2].end, 0); // the final circle has closed to a point: everywhere is outside
+      match.time = STAGES[2].end;
+      const [x, z] = how === 'storm' ? [storm.center.x, storm.center.y] : [0, 0], side = how === 'storm' ? 6 : ISLAND + 4;
+      you.f.respawn(new THREE.Vector3(x + side, 0.0001, z));
+      bot.respawn(new THREE.Vector3(x - side, 0.0001, z));
+      for (const f of [you.f, bot])
+        if (how === 'storm') f.hp = 1;
+        else [f.pos.y, f.vel.y] = [-24.9, -20];
+      match.step(0.2, false);
+      const res = match.result;
+      got.push(`${how}: ${!res ? 'no result' : res.won ? 'Victory Royale' : `Eliminated #${res.place}`}, ${match.left} left`);
+      ok &&= !!res && !res.won && res.place === 2 && !you.f.alive && !bot.alive;
+    }
+    check('Player and last bot out in the same step: the player places #2', ok, got.join('; '));
+  }
+
+  // Once the player has won, the result holds: the final storm, a stomp on them and a fall off the
+  // island cannot take them, and the feed has nothing more to say about them.
+  {
+    const bot = lastTwo();
+    match.time = BOSS_AT - 1;
+    you.f.respawn(new THREE.Vector3(2.5, 0.0001, 7.5));
+    hurt(bot, 100, you.f, fx);
+    match.step(1 / 60, false);
+    const won = match.result?.won === true;
+    match.feed.length = 0;
+    storm.update(STAGES[2].end, 0);
+    match.time = STAGES[2].end;
+    boss.awaken(null);
+    b.from.set(you.f.pos.x - 8, 0, you.f.pos.z);
+    boss.pos.copy(b.from);
+    boss.landing.set(you.f.pos.x, 0, you.f.pos.z);
+    b.phase = 'air';
+    b.clock = 0;
+    let lowest = 100;
+    for (let t = 0; t < 12; t += 1 / 60) {
+      match.step(1 / 60, false);
+      lowest = Math.min(lowest, you.f.hp);
+    }
+    you.f.pos.set(ISLAND + 4, -24.9, 0);
+    you.f.vel.set(0, -20, 0);
+    match.step(0.2, false);
+    const about = match.feed.filter((l) => l.you).map((l) => l.text);
+    check('Victory Royale holds: the winner outlasts the storm, a stomp and a fall', won && match.result?.won === true && you.f.alive && lowest === 100 && you.f.pos.y > 0 && about.length === 0,
+      `won ${won}, still won ${match.result?.won}; lowest hp ${r(lowest, 1)} through 12 s of the final storm and a landing on them; after falling off they stand at y ${r(you.f.pos.y, 1)}; feed lines about them ${about.length ? about.join(' | ') : 'none'}`);
+    boss.reset();
+  }
+
+  // The arrival shot from the plaza, the player's aim facing away. The camera turns to watch it rise
+  // and holds through the roar, with the whole colossus in frame (finding 4). Each spot it can rise at.
+  {
+    const cam = new THREE.PerspectiveCamera(70, 16 / 9, 0.1, 1200);
+    const look = { at: new THREE.Vector3(), weight: 0 };
+    const blocked = (x: number, y: number, z: number) => boss.inside(x, y, z);
+    const seen = new Set<string>(), got: string[] = [];
+    let ok = true;
+    const random = Math.random;
+    for (let k = 0; k < 4; k++) {
+      resetWorld();
+      you.f.respawn(new THREE.Vector3(2.5, 0.0001, 7.5));
+      Math.random = () => k / 4 + 0.01; // picks each of the spots it may choose in turn
+      boss.awaken(you.f.pos);
+      Math.random = random;
+      const at = `(${r(boss.pos.x, 1)}, ${r(boss.pos.z, 1)})`;
+      if (seen.has(at)) continue;
+      seen.add(at);
+      you.yaw = Math.atan2(boss.pos.x - 2.5, boss.pos.z - 7.5) + Math.PI;
+      you.pitch = -0.22;
+      let t = 0, roarAt = -1, held = 1, back = -1, frame: number[] | null = null;
+      while (t < 16) {
+        const before = boss.phase;
+        boss.update(1 / 60, [], fx);
+        fx.update(1 / 60);
+        t += 1 / 60;
+        look.weight = boss.beat();
+        if (look.weight > 0) boss.lookPoint(look.at);
+        you.updateCamera(cam, 1 / 60, look, blocked);
+        if (before === 'rising' && boss.phase === 'roar') roarAt = t;
+        if (boss.phase === 'roar' || (boss.phase === 'rising' && boss.pos.y > -BOSS_HEIGHT / 2)) held = Math.min(held, look.weight);
+        if (roarAt > 0 && !frame && t - roarAt >= 0.5) frame = onScreen(boss.root, cam);
+        if (roarAt > 0 && back < 0 && look.weight === 0) back = t - roarAt;
+      }
+      const inFrame = !!frame && frame[0] >= -1 && frame[1] <= 1 && frame[2] >= -1 && frame[3] <= 1;
+      ok &&= inFrame && held === 1 && back > 1.6 && back < 3;
+      got.push(`rose at ${at}: at the roar it spans x ${frame?.slice(0, 2).map((n) => r(n, 2)).join('..')}, y ${frame?.slice(2).map((n) => r(n, 2)).join('..')} of the frame; held ${r(held, 2)}; back to the player ${r(back, 1)} s after the roar began`);
+      boss.reset();
+    }
+    check('Arrival shot holds the whole boss in frame through the roar', ok && seen.size >= 2, got.join('; '));
+  }
+
+  // A mouse move during the shot hands the camera back: it eases off within a second.
+  {
+    resetWorld();
+    boss.awaken(null);
+    let t = 0;
+    while (boss.beat() < 1 || t < 5) {
+      boss.update(1 / 60, [], fx);
+      t += 1 / 60;
+    }
+    boss.cutBeat();
+    const cutAt = t;
+    while (boss.beat() > 0 && t < cutAt + 3) {
+      boss.update(1 / 60, [], fx);
+      t += 1 / 60;
+    }
+    check('A mouse move ends the arrival shot early', boss.beat() === 0 && t - cutAt <= 1 && boss.phase === 'rising',
+      `cut ${r(cutAt - 3.5, 1)} s into the rise; camera back with the player ${r(t - cutAt, 2)} s later, while it is still ${boss.phase}`);
+    boss.reset();
+  }
+  you.f.hide();
+  for (const f of match.fighters) f.hide();
+}
+
+/** Where a model's points above the ground land in the camera's frame: [left, right, bottom, top], -1..1 on screen. */
+function onScreen(root: THREE.Object3D, cam: THREE.PerspectiveCamera): number[] {
+  root.updateMatrixWorld(true);
+  cam.updateMatrixWorld();
+  const box = [Infinity, -Infinity, Infinity, -Infinity], v = new THREE.Vector3();
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const pos = mesh.geometry.getAttribute('position');
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+      if (v.y < 0) continue;
+      v.project(cam);
+      if (v.z > 1) v.set(9, 9, 0); // behind the camera: off screen
+      box[0] = Math.min(box[0], v.x);
+      box[1] = Math.max(box[1], v.x);
+      box[2] = Math.min(box[2], v.y);
+      box[3] = Math.max(box[3], v.y);
+    }
+  });
+  return box;
+}
+
+/** Steps a match's bots and physics without the boss moving or the storm closing. */
+function runBots(match: Match, dt: number) {
+  const hz = { boss: match.boss, storm: match.storm };
+  for (const b of match.bots) b.update(dt, match.fighters, 0, hz);
+  for (let i = 0; i < Math.round(dt / STEP); i++) {
+    for (const f of match.fighters) if (f.root.visible) stepBody(f, fx);
+    collideFighters(match.fighters, fx);
+  }
 }

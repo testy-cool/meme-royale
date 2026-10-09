@@ -4,7 +4,8 @@ import * as THREE from 'three';
 export const ISLAND = 36;
 
 // Voxel grid for everything built on the island. Cell (x, y, z) fills [x, x+1) × [y, y+1) × [z, z+1).
-const OFF = 40, SIZE = 80, HEIGHT = 24;
+const OFF = 40, SIZE = 80;
+export const HEIGHT = 24; // cells of building space above the ground
 const grid = new Uint8Array(SIZE * HEIGHT * SIZE); // block kind per cell, 0 = air
 const slot = new Int32Array(SIZE * HEIGHT * SIZE); // instance index of the block inside its kind's mesh
 const cellIndex = (x: number, y: number, z: number) => ((x + OFF) * HEIGHT + y) * SIZE + (z + OFF);
@@ -263,11 +264,12 @@ export function openSpot(): THREE.Vector3 {
  * How far the camera can back away from `from` along `dir` while its near plane stays out of blocks,
  * however close the nearest wall is. Leaves do not count.
  */
-export function clearDistance(from: THREE.Vector3, dir: THREE.Vector3, max: number): number {
+export function clearDistance(from: THREE.Vector3, dir: THREE.Vector3, max: number, inside?: (x: number, y: number, z: number) => boolean): number {
   const R = 0.22; // the near plane's corners reach this far from the camera
   const blocks = (x: number, y: number, z: number) => isSolid(x, y, z) && !(inGrid(x, y, z) && grid[cellIndex(x, y, z)] === B.leaves);
   for (let t = 0; t < max; t += 0.05) {
     const px = from.x + dir.x * t, py = from.y + dir.y * t, pz = from.z + dir.z * t;
+    if (inside?.(px, py, pz)) return Math.max(0, t - 0.05 - R);
     for (let x = Math.floor(px - R); x <= Math.floor(px + R); x++)
       for (let y = Math.floor(py - R); y <= Math.floor(py + R); y++)
         for (let z = Math.floor(pz - R); z <= Math.floor(pz + R); z++) if (blocks(x, y, z)) return Math.max(0, t - 0.05);
@@ -329,28 +331,42 @@ function island(scene: THREE.Scene, maxAnisotropy: number) {
 
 function blocks(scene: THREE.Scene) {
   const cube = new THREE.BoxGeometry(1, 1, 1);
-  const lists: number[][] = KINDS.map(() => []);
-  for (let x = -OFF; x < OFF; x++)
-    for (let y = 0; y < HEIGHT; y++)
-      for (let z = -OFF; z < OFF; z++) {
-        const c = cellIndex(x, y, z);
-        if (grid[c]) lists[grid[c]].push(x, y, z);
-      }
+  const counts = KINDS.map(() => 0);
+  for (const k of grid) if (k) counts[k]++;
   KINDS.forEach((kind, k) => {
     if (!kind) return;
-    const cells = lists[k], count = cells.length / 3;
-    const mesh = new THREE.InstancedMesh(cube, new THREE.MeshLambertMaterial({ map: kind.tex }), count);
-    for (let i = 0; i < count; i++) {
-      const x = cells[i * 3], y = cells[i * 3 + 1], z = cells[i * 3 + 2], c = cellIndex(x, y, z);
-      mesh.setMatrixAt(i, tmpMatrix.makeTranslation(x + 0.5, y + 0.5, z + 0.5));
-      mesh.setColorAt(i, tmpColor.setScalar(0.9 + rand() * 0.15));
-      slot[c] = i;
-      kind.cells[i] = c;
-    }
+    const mesh = new THREE.InstancedMesh(cube, new THREE.MeshLambertMaterial({ map: kind.tex }), counts[k]);
     mesh.castShadow = mesh.receiveShadow = true;
     kind.mesh = mesh;
     scene.add(mesh);
   });
+  fillBlocks();
+}
+
+/** Puts one instance in each kind's mesh for every block in the grid. */
+function fillBlocks() {
+  for (const kind of KINDS) if (kind) kind.mesh!.count = 0;
+  for (let x = -OFF; x < OFF; x++)
+    for (let y = 0; y < HEIGHT; y++)
+      for (let z = -OFF; z < OFF; z++) {
+        const c = cellIndex(x, y, z), kind = KINDS[grid[c]];
+        if (!kind) continue;
+        const mesh = kind.mesh!, i = mesh.count;
+        if (i >= mesh.instanceMatrix.count) {
+          grid[c] = 0; // more blocks than the mesh was built for; cannot happen with the same village
+          continue;
+        }
+        mesh.count++;
+        mesh.setMatrixAt(i, tmpMatrix.makeTranslation(x + 0.5, y + 0.5, z + 0.5));
+        mesh.setColorAt(i, tmpColor.setScalar(0.9 + rand() * 0.15));
+        slot[c] = i;
+        kind.cells[i] = c;
+      }
+  for (const kind of KINDS) {
+    if (!kind) continue;
+    kind.mesh!.instanceMatrix.needsUpdate = true;
+    if (kind.mesh!.instanceColor) kind.mesh!.instanceColor.needsUpdate = true;
+  }
 }
 
 // ---- Sky, light, clouds ------------------------------------------------------------------
@@ -427,8 +443,21 @@ function environment(scene: THREE.Scene): Environment {
   };
 }
 
+let villageSeed = 0;
+
+/** Puts the village back the way it was built, for the next match. */
+export function resetWorld() {
+  grid.fill(0);
+  ground.fill(0);
+  reserved.fill(0); // trees go wherever nothing is reserved, so the plan must start from scratch
+  seed = villageSeed;
+  planVillage();
+  fillBlocks();
+}
+
 export function buildWorld(scene: THREE.Scene, maxAnisotropy: number): Environment {
   makeKinds();
+  villageSeed = seed;
   planVillage();
   island(scene, maxAnisotropy);
   blocks(scene);

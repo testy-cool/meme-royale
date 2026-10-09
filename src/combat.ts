@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Fighter, PUNCH_HIT_AT, PUNCH_TIME } from './fighter';
+import { Fighter, PUNCH_HIT_AT, PUNCH_TIME, type Harm } from './fighter';
 import { isSolid, removeBlock } from './world';
 import type { Fx } from './fx';
 
@@ -11,17 +11,27 @@ const SLAM_RADIUS = 9;
 const PLAYER_REACH = 2.7;
 export const AIM_REACH = 3.4; // the player's punch locks onto a target this close inside a narrow cone
 
+const BLAME_TIME = 6; // a fighter hurt this recently is credited when the victim goes down another way
+const RECOVER_AFTER = 8; // seconds without damage before health starts coming back
+const RECOVER_RATE = 2.5; // health per second
+
 const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3();
+
+/** Fighters knocked out since the match last looked, in order. */
+export const knockouts: Fighter[] = [];
 
 /** Advances one body by one fixed step: control, gravity, voxel collisions and wall smashing. */
 export function stepBody(f: Fighter, fx: Fx) {
   const dt = STEP, v = f.vel;
   f.bumpImmune -= dt;
+  f.blameAge += dt;
+  f.calm += dt;
+  if (f.calm > RECOVER_AFTER && f.alive && f.hp < 100) f.hp = Math.min(100, f.hp + RECOVER_RATE * dt);
   if (f.tumbling) {
     f.tumbleTime += dt;
     const speed = Math.hypot(v.x, v.z);
     if (f.grounded && speed > 0) {
-      const k = Math.max(0, speed - 16 * dt) / speed;
+      const k = Math.max(0, speed - 28 * dt) / speed; // a tumbling body grinds to a halt, short of the cliff
       v.x *= k;
       v.z *= k;
     }
@@ -126,7 +136,7 @@ function smash(f: Fighter, fx: Fx) {
   f.squashVel = 6;
   fx.dust(at, 8, 4);
   fx.shake(0.4, at);
-  hurt(f, 4 + broken * 0.5, null, fx);
+  hurt(f, 4 + broken * 0.5, null, fx, 'wall');
 }
 
 function land(f: Fighter, speed: number, fx: Fx) {
@@ -135,15 +145,24 @@ function land(f: Fighter, speed: number, fx: Fx) {
   if (speed > 20) fx.shake(0.25, f.pos);
 }
 
-export function hurt(f: Fighter, dmg: number, by: Fighter | null, fx: Fx) {
-  if (!f.alive) return;
+export function hurt(f: Fighter, dmg: number, by: Fighter | 'boss' | null, fx: Fx, how: Harm = 'hit') {
+  if (!f.alive || f.invulnerable) return;
   f.hp = Math.max(0, f.hp - dmg);
   f.hpShownFor = 3;
-  if (by && by !== f) f.lastHitBy = by;
-  if (f.hp <= 0) knockOut(f, fx);
+  f.calm = 0;
+  if (by && by !== f) {
+    if (by !== 'boss') f.lastHitBy = by;
+    f.blame = by;
+    f.blameAge = 0;
+  }
+  if (f.hp <= 0) knockOut(f, fx, how);
 }
 
-export function knockOut(f: Fighter, fx: Fx) {
+/** Knocks a fighter out. Whoever hurt them in the last few seconds gets the credit, except for the storm. */
+export function knockOut(f: Fighter, fx: Fx, how: Harm) {
+  f.koHow = how;
+  f.koBy = how !== 'storm' && f.blameAge < BLAME_TIME ? f.blame : null;
+  knockouts.push(f);
   f.hp = 0;
   f.koTimer = 2.4;
   f.tumbling = true;
@@ -157,7 +176,9 @@ function applyHit(attacker: Fighter, t: Fighter, dir: THREE.Vector3, dmg: number
   hurt(t, dmg, attacker, fx);
   const ko = !t.alive;
   const k = Math.min(2.6, power * (1 + (1 - t.hp / 100) * 1.3) * (ko ? 1.5 : 1));
-  t.vel.set(dir.x * 15 * k, 6 + 4 * k, dir.z * 15 * k);
+  // Bots trading blows fly less far than anyone fighting the player, or they ring each other out in a minute.
+  const out = attacker.isPlayer || t.isPlayer ? 15 : 8;
+  t.vel.set(dir.x * out * k, 6 + 4 * k, dir.z * out * k);
   t.launch(dir);
   t.grounded = false;
   t.squashVel = 7;
@@ -235,7 +256,8 @@ function resolvePunch(f: Fighter, all: Fighter[], fx: Fx) {
   if (dir.lengthSq() < 0.01) dir.copy(fwd);
   dir.normalize().lerp(fwd, 0.5).normalize();
   const finisher = f.combo === 3;
-  applyHit(f, best, dir, (f.isPlayer ? 18 : 9) * (finisher ? 1.4 : 1), f.look.power * (finisher ? 1.5 : 1), fx);
+  const dmg = f.isPlayer ? 18 : best.isPlayer ? 9 : 7; // bots go easier on each other, so matches last
+  applyHit(f, best, dir, dmg * (finisher ? 1.4 : 1), f.look.power * (finisher ? 1.5 : 1), fx);
 }
 
 /** The player's fists also break the block in front of them. */
@@ -310,7 +332,7 @@ export function collideFighters(all: Fighter[], fx: Fx) {
 }
 
 /** Pushes a body sideways, but never into a block. */
-function shove(f: Fighter, dx: number, dz: number) {
+export function shove(f: Fighter, dx: number, dz: number) {
   if (dx && sweep(f, 0, dx)) stopAt(f, 0, dx);
   if (dz && sweep(f, 2, dz)) stopAt(f, 2, dz);
 }

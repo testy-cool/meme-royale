@@ -17,6 +17,7 @@ class Chunks {
   private readonly life: Float32Array;
   private readonly maxLife: Float32Array;
   private readonly grav: Float32Array;
+  private readonly drag: Float32Array; // fraction of speed lost per second, for dust hanging in the air
 
   constructor(scene: THREE.Scene, private readonly max: number, material: THREE.Material, private readonly solid: boolean) {
     this.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material, max);
@@ -34,9 +35,10 @@ class Chunks {
     this.life = new Float32Array(max);
     this.maxLife = new Float32Array(max);
     this.grav = new Float32Array(max);
+    this.drag = new Float32Array(max);
   }
 
-  add(pos: THREE.Vector3, vel: THREE.Vector3, size: number, color: THREE.Color, life: number, grav = 1, spin = 10) {
+  add(pos: THREE.Vector3, vel: THREE.Vector3, size: number, color: THREE.Color, life: number, grav = 1, spin = 10, drag = 0) {
     if (this.n >= this.max) return;
     const i = this.n++;
     pos.toArray(this.p, i * 3);
@@ -46,7 +48,12 @@ class Chunks {
     this.size[i] = size;
     this.life[i] = this.maxLife[i] = life;
     this.grav[i] = grav;
+    this.drag[i] = drag;
     this.mesh.setColorAt(i, color);
+  }
+
+  clear() {
+    this.n = this.mesh.count = 0;
   }
 
   /** Pushes every chunk within `radius` of `c` outward and up. */
@@ -81,7 +88,8 @@ class Chunks {
         for (let h = 0; h < hops; h++) this.hop(i, dt / hops);
       } else {
         v[a + 1] -= GRAVITY * this.grav[i] * dt;
-        for (let k = 0; k < 3; k++) p[a + k] += v[a + k] * dt;
+        const keep = Math.max(0, 1 - this.drag[i] * dt);
+        for (let k = 0; k < 3; k++) p[a + k] += (v[a + k] *= keep) * dt;
       }
       v1.fromArray(w, a);
       const spin = v1.length();
@@ -91,8 +99,13 @@ class Chunks {
       this.mesh.setMatrixAt(i, m4.compose(v2.fromArray(p, a), q1, scl.setScalar(this.size[i] * fade)));
     }
     this.mesh.count = this.n;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    if (!this.n) return;
+    // Upload only the live chunks: the pools are sized for the biggest stomp, and most frames use a fraction.
+    const m = this.mesh.instanceMatrix, c = this.mesh.instanceColor!;
+    m.addUpdateRange(0, this.n * 16);
+    m.needsUpdate = true;
+    c.addUpdateRange(0, this.n * 3);
+    c.needsUpdate = true;
   }
 
   /** Moves chunk `i` for `dt` seconds and bounces it off the blocks it runs into. */
@@ -137,6 +150,7 @@ class Chunks {
     copy(this.life, 1);
     copy(this.maxLife, 1);
     copy(this.grav, 1);
+    copy(this.drag, 1);
     copy(this.mesh.instanceColor!.array as Float32Array, 3);
   }
 }
@@ -155,23 +169,35 @@ function glowTexture(): THREE.Texture {
 }
 
 const RAINBOW = [0xff3b30, 0xff9500, 0xffcc00, 0x34c759, 0x0a84ff, 0x8e5cf7].map((c) => new THREE.Color(c));
-const WHITE = new THREE.Color(0xffffff), SPARK = new THREE.Color(0xfff0a8), DUST = new THREE.Color(0xd8cfb8);
+const WHITE = new THREE.Color(0xffffff), SPARK = new THREE.Color(0xfff0a8), DUST = new THREE.Color(0xd8cfb8), HAZE = new THREE.Color(0xe6dcc6);
+const EARTH = [0x8a6a4a, 0x6f5236, 0x68a246, 0x9c8a74].map((c) => new THREE.Color(c));
+const tint = new THREE.Color();
+
+interface Ring {
+  mesh: THREE.Mesh;
+  t: number;
+  radius: number;
+  duration: number;
+}
 
 export class Fx {
   freeze = 0; // hit-stop: seconds the simulation stays frozen
   quiet = true; // no hit-stop or shake while the title screen shows the bots fighting
-  shakeScale = 1; // Reduce motion turns screen shake down to a quarter
+  reduceMotion = false; // screen shake at a quarter, no screen tilt
+  rumble = 0; // 0..1: the ground shaking under the boss, a steady shake and a slow tilt
   readonly focus = new THREE.Vector3(); // the player; events far from it shake less
   private trauma = 0;
   private time = 0;
   private readonly debris: Chunks;
   private readonly sparks: Chunks;
-  private readonly rings: { mesh: THREE.Mesh; t: number; radius: number }[] = [];
+  private readonly clouds: Chunks; // big, slow dust thrown up by the boss
+  private readonly rings: Ring[] = [];
   private readonly flashes: { sprite: THREE.Sprite; t: number; size: number }[] = [];
 
   constructor(private readonly scene: THREE.Scene) {
-    this.debris = new Chunks(scene, 1400, new THREE.MeshLambertMaterial(), true);
-    this.sparks = new Chunks(scene, 900, new THREE.MeshBasicMaterial({ fog: false }), false);
+    this.debris = new Chunks(scene, 3200, new THREE.MeshLambertMaterial(), true);
+    this.sparks = new Chunks(scene, 1200, new THREE.MeshBasicMaterial({ fog: false }), false);
+    this.clouds = new Chunks(scene, 1600, new THREE.MeshBasicMaterial(), false); // unlit, so dust never looks like rock
     const glow = glowTexture();
     for (let i = 0; i < 6; i++) {
       const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, blending: THREE.AdditiveBlending, depthTest: false, transparent: true }));
@@ -181,27 +207,39 @@ export class Fx {
     }
   }
 
+  /** Clears every effect in flight, for a new match. */
+  reset() {
+    this.debris.clear();
+    this.sparks.clear();
+    this.clouds.clear();
+    for (const r of this.rings) {
+      r.t = 1;
+      r.mesh.visible = false;
+    }
+    this.trauma = this.rumble = this.freeze = 0;
+  }
+
   hitStop(seconds: number) {
     if (this.quiet) return;
     this.freeze = Math.max(this.freeze, seconds);
   }
 
-  /** Adds screen shake, weaker the farther `at` is from the player. */
-  shake(amount: number, at?: THREE.Vector3) {
+  /** Adds screen shake, fading out to nothing `reach` blocks from the player. */
+  shake(amount: number, at?: THREE.Vector3, reach = 28) {
     if (this.quiet) return;
-    const k = at ? Math.max(0, 1 - at.distanceTo(this.focus) / 28) : 1;
+    const k = at ? Math.max(0, 1 - at.distanceTo(this.focus) / reach) : 1;
     this.trauma = Math.min(1, this.trauma + amount * k);
   }
 
   /** Turns a broken block at cell (x, y, z) into tumbling chunks thrown along `push`. */
-  shatter(x: number, y: number, z: number, color: THREE.Color, push: THREE.Vector3) {
-    for (let i = 0; i < 4; i++) {
+  shatter(x: number, y: number, z: number, color: THREE.Color, push: THREE.Vector3, pieces = 4) {
+    for (let i = 0; i < pieces; i++) {
       v1.set(x + 0.25 + Math.random() * 0.5, y + 0.25 + Math.random() * 0.5, z + 0.25 + Math.random() * 0.5);
       v2.copy(push).multiplyScalar(0.35 + Math.random() * 0.35);
       v2.x += (Math.random() * 2 - 1) * 4;
       v2.y += 2 + Math.random() * 6;
       v2.z += (Math.random() * 2 - 1) * 4;
-      this.debris.add(v1, v2, 0.32 + Math.random() * 0.24, color, 6 + Math.random() * 3);
+      this.debris.add(v1, v2, (0.32 + Math.random() * 0.24) * (pieces < 4 ? 1.15 : 1), color, 6 + Math.random() * 3);
     }
   }
 
@@ -248,23 +286,29 @@ export class Fx {
     }
   }
 
-  /** The slam: an expanding ring on the ground that also throws every loose chunk in range. */
-  shockwave(at: THREE.Vector3, radius: number) {
+  private ring(at: THREE.Vector3, radius: number, duration: number, color: number) {
     let ring = this.rings.find((r) => r.t >= 1);
     if (!ring) {
       const mesh = new THREE.Mesh(
-        new THREE.RingGeometry(0.82, 1, 64),
-        new THREE.MeshBasicMaterial({ color: 0xfff1cc, transparent: true, side: THREE.DoubleSide, depthWrite: false }),
+        new THREE.RingGeometry(0.82, 1, 96),
+        new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false }),
       );
       mesh.rotation.x = -Math.PI / 2;
       this.scene.add(mesh);
-      ring = { mesh, t: 1, radius };
+      ring = { mesh, t: 1, radius, duration };
       this.rings.push(ring);
     }
     ring.t = 0;
     ring.radius = radius;
+    ring.duration = duration;
+    (ring.mesh.material as THREE.MeshBasicMaterial).color.set(color);
     ring.mesh.position.set(at.x, at.y + 0.12, at.z);
     ring.mesh.visible = true;
+  }
+
+  /** The slam: an expanding ring on the ground that also throws every loose chunk in range. */
+  shockwave(at: THREE.Vector3, radius: number) {
+    this.ring(at, radius, 0.42, 0xfff1cc);
     this.debris.blast(at, radius, 16);
     for (let i = 0; i < 36; i++) {
       const a = (i / 36) * Math.PI * 2;
@@ -274,12 +318,51 @@ export class Fx {
     }
   }
 
+  /**
+   * The boss lands: a wall of dust rolls out from the edge of its footprint, a wide ring races
+   * across the ground, and every loose chunk in range is thrown again.
+   */
+  quake(at: THREE.Vector3, footprint: number, radius: number) {
+    this.ring(at, radius, 0.9, 0xe9dcc0);
+    this.ring(at, footprint + 3, 0.5, 0xfff4dc);
+    this.debris.blast(at, radius, 8);
+    for (let i = 0; i < 160; i++) {
+      const a = Math.random() * Math.PI * 2, r = footprint * (0.8 + Math.random() * 0.4), speed = 9 + Math.random() * 14;
+      v1.set(at.x + Math.cos(a) * r, at.y + 0.3 + Math.random() * 1.5, at.z + Math.sin(a) * r);
+      v2.set(Math.cos(a) * speed, 1 + Math.random() * 5, Math.sin(a) * speed);
+      tint.copy(HAZE).multiplyScalar(0.85 + Math.random() * 0.15);
+      this.clouds.add(v1, v2, 0.5 + Math.random() * 0.7, tint, 1.2 + Math.random() * 1.2, -0.03, 1.5, 1.3);
+    }
+    for (let i = 0; i < 60; i++) {
+      const a = Math.random() * Math.PI * 2, r = footprint * (0.9 + Math.random() * 0.3);
+      v1.set(at.x + Math.cos(a) * r, at.y + 0.3, at.z + Math.sin(a) * r);
+      v2.set(Math.cos(a) * (4 + Math.random() * 8), 8 + Math.random() * 12, Math.sin(a) * (4 + Math.random() * 8));
+      this.debris.add(v1, v2, 0.3 + Math.random() * 0.35, EARTH[i % EARTH.length], 3 + Math.random() * 2);
+    }
+  }
+
+  /** Dust and clods of earth bursting up around a ring of `radius`, while the boss rises through it. */
+  plume(at: THREE.Vector3, radius: number, count: number) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2, r = radius * (0.85 + Math.random() * 0.35);
+      v1.set(at.x + Math.cos(a) * r, 0.2 + Math.random(), at.z + Math.sin(a) * r);
+      v2.set(Math.cos(a) * (2 + Math.random() * 5), 3 + Math.random() * 9, Math.sin(a) * (2 + Math.random() * 5));
+      tint.copy(HAZE).multiplyScalar(0.82 + Math.random() * 0.18);
+      this.clouds.add(v1, v2, 0.5 + Math.random() * 0.8, tint, 1.5 + Math.random() * 1.3, -0.02, 1.2, 0.9);
+      if (Math.random() < 0.35) {
+        v2.set(Math.cos(a) * (3 + Math.random() * 6), 9 + Math.random() * 10, Math.sin(a) * (3 + Math.random() * 6));
+        this.debris.add(v1, v2, 0.3 + Math.random() * 0.3, EARTH[i % EARTH.length], 3 + Math.random() * 2);
+      }
+    }
+  }
+
   update(dt: number) {
     this.debris.update(dt);
     this.sparks.update(dt);
+    this.clouds.update(dt);
     for (const r of this.rings) {
       if (r.t >= 1) continue;
-      r.t = Math.min(1, r.t + dt / 0.42);
+      r.t = Math.min(1, r.t + dt / r.duration);
       const e = 1 - (1 - r.t) ** 3;
       r.mesh.scale.setScalar(0.6 + r.radius * e);
       (r.mesh.material as THREE.MeshBasicMaterial).opacity = 0.95 * (1 - r.t);
@@ -287,7 +370,7 @@ export class Fx {
     }
   }
 
-  /** Real-time effects that keep running during hit-stop: flashes and camera shake. */
+  /** Real-time effects that keep running during hit-stop: flashes, camera shake and the rumble's tilt. */
   updateCamera(camera: THREE.Camera, dt: number) {
     this.time += dt;
     for (const f of this.flashes) {
@@ -297,10 +380,12 @@ export class Fx {
       f.sprite.material.opacity = 1 - f.t;
       f.sprite.visible = f.t < 1;
     }
-    this.trauma = Math.max(0, this.trauma - dt * 2.4);
-    const s = this.trauma * this.trauma * 0.42 * this.shakeScale, t = this.time * 40;
+    const rumble = this.quiet ? 0 : this.rumble;
+    this.trauma = Math.max(rumble * 0.6, this.trauma - dt * 2.4);
+    const s = this.trauma * this.trauma * 0.42 * (this.reduceMotion ? 0.25 : 1), t = this.time * 40;
     camera.position.x += Math.sin(t * 1.1) * s;
     camera.position.y += Math.sin(t * 1.7 + 1) * s * 0.8;
     camera.position.z += Math.cos(t * 1.3 + 2) * s;
+    if (rumble > 0 && !this.reduceMotion) camera.rotateZ(Math.sin(this.time * 1.9) * 0.06 * rumble);
   }
 }

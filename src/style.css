@@ -32,8 +32,7 @@ body {
 }
 
 .overlay[hidden],
-#hud[hidden],
-.ko[hidden] {
+#hud[hidden] {
   display: none;
 }
 
@@ -46,6 +45,22 @@ h1 {
   text-transform: uppercase;
   /* a stepped block extrusion, Minecraft title style */
   text-shadow: 0 4px 0 #3b3b3b, 0 8px 0 #2a2a2a, 0 12px 0 #1c1c1c, 0 18px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* end screens: "Victory Royale" or "Eliminated — #N" */
+.overlay.end h1 {
+  font-size: clamp(44px, 8vw, 104px);
+}
+
+.overlay.win h1 {
+  color: #ffd54a;
+}
+
+#detail {
+  margin: -12px 0 0;
+  font-size: 26px;
+  font-weight: 700;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.7);
 }
 
 #play {
@@ -160,13 +175,57 @@ h1 {
   position: relative;
 }
 
-.ko {
+.corner {
   position: fixed;
-  left: 0;
-  right: 0;
-  top: 38%;
-  text-align: center;
-  font-size: 40px;
+  top: 20px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  text-align: right;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.75);
+}
+
+.left {
+  font-size: 30px;
   font-weight: 900;
-  text-shadow: 0 3px 0 #222, 0 6px 16px rgba(0, 0, 0, 0.5);
+}
+
+.feed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.line {
+  padding: 4px 12px;
+  border-radius: 4px;
+  background: rgba(20, 20, 20, 0.5);
+  font-size: 20px;
+  font-weight: 700;
+  transition: opacity 1s;
+}
+
+.line.you {
+  color: #ffd54a;
+}
+
+.line.fading {
+  opacity: 0;
+}
+
+/* a purple edge around the screen while the player stands in the storm */
+.storm-edge {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(138, 77, 255, 0) 50%, rgba(138, 77, 255, 0.5) 100%);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.storm-edge.on {
+  opacity: 1;
 }

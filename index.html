@@ -7,16 +7,21 @@
   </head>
   <body>
     <canvas id="game"></canvas>
+    <div id="hud" hidden>
+      <div class="storm-edge"></div>
+      <div class="corner">
+        <div class="left">6 left</div>
+        <div class="feed" aria-live="polite"></div>
+      </div>
+      <div class="hp" aria-label="Health"><div class="hp-fill"></div><span class="hp-text">100</span></div>
+      <div class="slam ready" aria-label="Ground slam"><div class="slam-fill"></div><span>Q</span></div>
+    </div>
     <div id="start" class="overlay">
-      <h1>Meme Royale</h1>
+      <h1 id="title">Meme Royale</h1>
+      <p id="detail" hidden></p>
       <button id="play" type="button">Play</button>
       <p class="controls">WASD move · Mouse look · Space jump · Shift sprint · Click punch · Q slam</p>
       <label class="motion"><input id="reduce-motion" type="checkbox" /> Reduce motion</label>
-    </div>
-    <div id="hud" hidden>
-      <div class="hp" aria-label="Health"><div class="hp-fill"></div><span class="hp-text">100</span></div>
-      <div class="slam ready" aria-label="Ground slam"><div class="slam-fill"></div><span>Q</span></div>
-      <div class="ko" hidden>Knocked out</div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
