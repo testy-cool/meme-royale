@@ -32,6 +32,9 @@ const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const tmpQ = new THREE.Quaternion();
 const IDENTITY = new THREE.Quaternion();
 
+/** What knocked a fighter out. */
+export type Harm = 'hit' | 'wall' | 'fall' | 'storm' | 'boss';
+
 export const PUNCH_HIT_AT = 0.07; // seconds into the punch when the fist connects
 export const PUNCH_TIME = 0.26;
 
@@ -70,7 +73,14 @@ export class Fighter {
   lastPunchAt = -9;
   windup = 0; // bots: > 0 while telegraphing a punch
   koTimer = -1; // >= 0 while knocked out, counts down to the respawn
+  out = false; // eliminated from the match: stays knocked out
   lastHitBy: Fighter | null = null;
+  blame: Fighter | 'boss' | null = null; // who last hurt this fighter, credited if they go down soon after
+  blameAge = 99; // seconds since then
+  calm = 0; // seconds since any damage: after a while, health comes back
+  koHow: Harm = 'hit';
+  koBy: Fighter | 'boss' | null = null;
+  panic = false; // fleeing: runs with its arms up
   aim: Fighter | null = null; // the target the player's punch is locked onto (aim assist)
   bumpImmune = 0;
   hpShownFor = 0;
@@ -150,7 +160,7 @@ export class Fighter {
   }
 
   get alive() {
-    return this.koTimer < 0;
+    return this.koTimer < 0 && !this.out;
   }
 
   centre(out: THREE.Vector3) {
@@ -180,9 +190,14 @@ export class Fighter {
     this.hp = 100;
     this.tumbling = false;
     this.koTimer = -1;
+    this.out = false;
     this.punchT = -1;
     this.windup = 0;
-    this.lastHitBy = null;
+    this.lastHitBy = this.blame = this.koBy = null;
+    this.blameAge = 99;
+    this.calm = 0;
+    this.panic = false;
+    this.aim = null;
     this.hpShownFor = 0;
     this.spinner.quaternion.identity();
     this.root.visible = true;
@@ -236,6 +251,10 @@ export class Fighter {
       this.legR.rotation.x = 0.25;
       this.armL.rotation.z = 0.6;
       this.armR.rotation.z = -0.6;
+    } else if (this.panic) {
+      const t = this.time * 15;
+      this.armL.rotation.set(-2.75 + Math.sin(t) * 0.35, 0, 0.3);
+      this.armR.rotation.set(-2.75 + Math.cos(t) * 0.35, 0, -0.3);
     }
 
     if (this.windup > 0) {

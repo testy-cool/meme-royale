@@ -127,3 +127,55 @@ The worker appends short, durable lessons here: gotchas, decisions, and deploy s
 - `npx wrangler dev` runs npm → sh → node → workerd. Killing the recorded npm PID leaves the
   rest serving; kill the whole tree (`pgrep -P`).
 - `Emulation.setEmulatedMedia` with `prefers-reduced-motion` tests the reduce-motion default.
+
+## M2 boss, storm and match loop (2026-10-10)
+
+### Match length is a tuning problem: simulate it headless
+- `Match` holds the whole simulation with no DOM, so the probe can run bot-only matches at 60
+  steps a second in about a second each. Logging every knockout's cause and position found each
+  problem below in minutes; a browser play-through would have needed hours.
+- With permanent eliminations, M1's knockback ended matches in under a minute, mostly by ring-outs.
+  What fixed it: bot-vs-bot hits launch less far (8 instead of 15) and do 7 damage (punches
+  involving the player are unchanged); tumbling bodies grind to a halt faster on the ground;
+  bots ignore targets near the island's edge, wander around the village, lose interest after a few
+  seconds of fighting, run when below 30 HP, and recover 2.5 HP a second after 8 s without damage.
+- The boss was the top killer. Each quake stunned bots just long enough for the next landing to
+  crush them. Fixes: quake throws go up, not out; the next landing is chosen at the start of
+  the pause and shown on the ground, about 3 s of warning; bots treat anything within 22 blocks of
+  the landing as danger, because the tank's corners reach 21; it stops to sing every 4 to 6 hops;
+  and it flushes itself away after 65 s of rampage.
+- A next circle of radius 0 made every bot "outside" it, so in the final stage they all walked to
+  the centre point and none fought. Once the next circle is tiny, bots stay inside the current one.
+- Result over 24 bot-only matches: median 3:40, 20 of 24 between 2:56 and 3:55.
+
+### Rendering the colossus
+- Build a static voxel model as one mesh of only the faces that touch air, not an InstancedMesh of
+  whole cubes. The 3,000-cube version cost 10 fps on the UHD 620 while it moved. The face mesh is
+  8,700 triangles and costs nothing measurable.
+- A voxel surface must not receive shadows: each step shades the next, a checkerboard.
+- Shaded sides and undersides go blue-grey and olive under the hemisphere light. A faint emissive
+  keeps porcelain white and skin from going dark brown.
+- `clippingPlanes` at ground level with `renderer.localClippingEnabled` hides the body while it
+  rises through the ground. Set `clipShadows` too, or its underground shadow shows.
+- To see a white model through pale fog, cap the fog's share in its materials: replace
+  `#include <fog_fragment>` in `onBeforeCompile` and multiply `fogFactor` by 0.4.
+- Run any blast that pushes loose chunks before the stomp creates new ones, or the new debris is
+  thrown twice, up to 45 blocks.
+- Lit dust looks like floating rocks. Dust must be unlit (MeshBasicMaterial).
+- Chunk pools sized for the biggest stomp should upload only their live range each frame
+  (`addUpdateRange(0, n * 16)` on `instanceMatrix`, then `needsUpdate`).
+- A camera placed by angle blending can hit opposite vectors. Blend yaw and pitch instead.
+- Any orbiting spectator camera must clear the boss's full height (44 blocks mid-hop), or it ends
+  up inside the bowl.
+
+### Browser checks for timed events
+- Screenshots take about a second each through browser-harness, so a "mid-rise" shot can land
+  after the camera beat is over. Pose shots instead: a requestAnimationFrame watcher sets
+  `fx.freeze` the moment the condition holds, and the script takes the shot and then unfreezes.
+- A promise that runs longer than the harness's call timeout kills the call. Store the result
+  on `window` and poll for it.
+- This machine is often loaded (load average 10, swap in use), so frame rates are noisy. Compare
+  on and off in the same run, several times, before believing a difference.
+- Never clear output directories with `rm`: a safety hook blocks it. Give each run its own
+  timestamped directory.
+- `memeRoyale.isSolid` exists so scripts can pick camera spots with a clear view.

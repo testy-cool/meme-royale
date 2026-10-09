@@ -6,7 +6,13 @@ import { clearDistance } from './world';
 
 const SENSITIVITY = 0.0024;
 const AIM_CONE = 0.35; // radians either side of the camera's aim where a punch locks on
-const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3();
+
+/** Something the camera briefly turns to watch, `weight` from 0 (not at all) to 1 (straight at it). */
+export interface Look {
+  at: THREE.Vector3;
+  weight: number;
+}
 
 /** Keyboard and mouse control of Gigachad, plus the third-person camera. */
 export class Player {
@@ -41,6 +47,10 @@ export class Player {
 
   /** Drops in from the sky. The landing is a free slam. */
   dropIn(at: THREE.Vector3) {
+    this.slamCooldown = 0;
+    this.wantPunch = this.wantSlam = false;
+    this.yaw = Math.atan2(-at.x, -at.z); // facing the middle of the island
+    this.pitch = -0.22;
     this.f.respawn(at.setY(24));
     this.f.vel.y = -20;
     this.slamPending = true;
@@ -117,16 +127,28 @@ export class Player {
     }
   }
 
-  updateCamera(camera: THREE.PerspectiveCamera, dt: number) {
+  /**
+   * Third-person camera behind the head. A `look` turns it toward something for a moment without
+   * touching the player's own aim, and `blocked` keeps it out of things that are not blocks.
+   */
+  updateCamera(camera: THREE.PerspectiveCamera, dt: number, look?: Look, blocked?: (x: number, y: number, z: number) => boolean) {
     const f = this.f;
     if (f.root.visible) {
       const target = v1.copy(f.pos);
       target.y += f.height + 0.45;
       this.focus.lerp(target, 1 - Math.exp(-18 * dt));
     }
-    const dir = v2.set(Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), Math.cos(this.yaw) * Math.cos(this.pitch));
+    let yaw = this.yaw, pitch = this.pitch, distance = 5.8;
+    if (look && look.weight > 0) {
+      // Swing the shortest way round toward it, and a step back to take in the scale.
+      const to = v3.copy(look.at).sub(this.focus), w = look.weight;
+      yaw += Math.atan2(Math.sin(Math.atan2(to.x, to.z) - yaw), Math.cos(Math.atan2(to.x, to.z) - yaw)) * w;
+      pitch += (THREE.MathUtils.clamp(Math.atan2(to.y, Math.hypot(to.x, to.z)), -0.6, 0.75) - pitch) * w;
+      distance += 2.5 * w;
+    }
+    const dir = v2.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
     const back = v1.copy(dir).negate();
-    camera.position.copy(this.focus).addScaledVector(back, clearDistance(this.focus, back, 5.8));
+    camera.position.copy(this.focus).addScaledVector(back, clearDistance(this.focus, back, distance, blocked));
     camera.lookAt(v1.copy(this.focus).add(dir));
   }
 }
