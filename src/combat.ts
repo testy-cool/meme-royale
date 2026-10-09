@@ -146,7 +146,7 @@ function land(f: Fighter, speed: number, fx: Fx) {
 }
 
 export function hurt(f: Fighter, dmg: number, by: Fighter | 'boss' | null, fx: Fx, how: Harm = 'hit') {
-  if (!f.alive) return;
+  if (!f.alive || f.invulnerable) return;
   f.hp = Math.max(0, f.hp - dmg);
   f.hpShownFor = 3;
   f.calm = 0;

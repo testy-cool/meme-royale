@@ -179,3 +179,21 @@ The worker appends short, durable lessons here: gotchas, decisions, and deploy s
 - Never clear output directories with `rm`: a safety hook blocks it. Give each run its own
   timestamped directory.
 - `memeRoyale.isSolid` exists so scripts can pick camera spots with a clear view.
+
+## M2 review fixes (2026-10-10)
+- A scan over a shape that turns must take its bounds from the turned shape. The stomp scanned 18
+  blocks around its centre, enough at 0 or 90 degrees, but at 45 degrees the tank's corners reach
+  21.5 blocks out and 92 blocks survived. Turn the shape's corners (and the oval's extents) into a
+  box, then keep the exact footprint test inside it. Probe every heading, not only the easy one.
+- Knockouts that land in the same step need an order before they get places. Count down from the
+  fighters still in plus this step's knockouts, the player first on a tie, so a loser is never #1.
+- A posed screenshot does not prove an automatic camera shows the payoff. Sample the camera's angle
+  off the target every frame, and project the model's vertices with `Vector3.project(camera)` to
+  check it is all in frame. The probe does both headlessly with the real `Player.updateCamera`.
+- To frame a 37-block model from 26 blocks away (vertical FOV 70), aim at the middle of what stands
+  above the ground, not at the head; aiming at the head cut off its base.
+- Reduce motion covers every camera move the player did not make: the orbits behind the menus too,
+  not only shake and tilt.
+- CDP `Input.dispatchMouseEvent` moves under pointer lock arrive with `movementX`, so a browser
+  check can test "a mouse move cancels the shot" with real input.
+- To make a random spawn choice deterministic in the probe, stub `Math.random` around the one call.

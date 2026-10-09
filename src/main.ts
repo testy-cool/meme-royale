@@ -86,8 +86,9 @@ function endScreen() {
   else menu(`Eliminated — #${r.place}`, r.line, 'Play Again');
 }
 
-// Reduce motion turns screen shake down to a quarter and drops the screen tilt and the camera's
-// turn toward the boss. It starts on when the system asks for less motion, and remembers the choice.
+// Reduce motion turns screen shake down to a quarter, drops the screen tilt and the camera's turn
+// toward the boss, and holds the overview cameras still. It starts on when the system asks for less
+// motion, and remembers the choice.
 const MOTION_KEY = 'meme-royale.reduce-motion';
 const motionBox = document.getElementById('reduce-motion') as HTMLInputElement;
 function savedMotion(): boolean | null {
@@ -143,8 +144,8 @@ function frame(t: number) {
   const watching = state === 'title' || (state === 'over' && !player.f.alive);
   if (watching) {
     // A slow orbit over the village; after an elimination, high over the storm's circle, above
-    // anything the boss can reach (its head tops out at 44 blocks mid-hop).
-    orbit += real * 0.05;
+    // anything the boss can reach (its head tops out at 44 blocks mid-hop). Still under reduce motion.
+    if (!fx.reduceMotion) orbit += real * 0.05;
     const c = state === 'title' ? null : match.storm.center, r = state === 'title' ? 36 : 44;
     const cx = c ? c.x : 0, cz = c ? c.y : 0;
     camera.position.set(cx + Math.cos(orbit) * r, state === 'title' ? 18 : 48, cz + Math.sin(orbit) * r);
@@ -152,6 +153,12 @@ function frame(t: number) {
     fx.focus.set(cx, 0, cz);
   } else {
     look.weight = fx.reduceMotion || !player.f.alive ? 0 : match.boss.beat();
+    // Moving the mouse during the arrival shot hands the camera straight back.
+    if (look.weight > 0 && player.moved > 24) {
+      match.boss.cutBeat();
+      look.weight = match.boss.beat();
+    }
+    if (look.weight === 0) player.moved = 0;
     if (look.weight > 0) match.boss.lookPoint(lookAt);
     player.updateCamera(camera, real, look, blockedByBoss);
     fx.focus.copy(player.f.pos);

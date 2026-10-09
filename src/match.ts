@@ -159,9 +159,18 @@ export class Match {
     if (before === 'air' && boss.phase === 'flush') this.feed.push({ text: `${BOSS_NAME} flushed itself away`, you: false });
   }
 
-  /** Falling off the island knocks you out. Knocked-out bodies burst, then respawn only between matches. */
+  /**
+   * Falling off the island knocks you out; a winner who falls drops back in instead. Knocked-out
+   * bodies burst, then respawn only between matches.
+   */
   private lifecycle(f: Fighter, dt: number) {
-    if (f.alive && f.pos.y < -25) knockOut(f, this.fx, 'fall');
+    if (f.alive && f.pos.y < -25) {
+      if (!f.invulnerable) knockOut(f, this.fx, 'fall');
+      else {
+        f.respawn(openSpot().setY(20));
+        f.invulnerable = true;
+      }
+    }
     if (f.alive) return;
     if (f.koTimer > 0) f.koTimer -= dt;
     if (f.root.visible && (f.koTimer < 1.5 || f.pos.y < -25)) {
@@ -172,20 +181,28 @@ export class Match {
     f.respawn(openSpot().setY(20));
   }
 
-  /** Turns this step's knockouts into feed lines, eliminations and, at the end, the result. */
+  /**
+   * Turns this step's knockouts into feed lines, eliminations and, at the end, the result. Fighters
+   * who go out in the same step place in turn, the player first: if the last two go down together,
+   * the player is #2, never a losing #1. Once the player has won, nothing can take them out.
+   */
   private tally() {
-    for (const f of knockouts.splice(0)) {
-      if (!this.live) continue;
+    const out = knockouts.splice(0);
+    if (!this.live) return;
+    out.sort((a, b) => Number(b.isPlayer) - Number(a.isPlayer));
+    let standing = this.left + out.length; // still in, counting this step's knockouts
+    for (const f of out) {
       f.out = true;
+      const place = standing--;
       const by = f.koBy, line = describe(f), byPlayer = by !== null && by !== 'boss' && by.isPlayer && by !== f;
       if (byPlayer) this.kills++;
       this.feed.push({ text: line, you: f.isPlayer || byPlayer });
       if (this.result) continue;
-      const left = this.left;
-      if (this.player && f.isPlayer) this.result = { won: false, place: left + 1, line };
-      else if (left <= 1 && this.player?.f.alive) this.result = { won: true, place: 1, line };
-      else if (left <= 1 && !this.player) this.result = { won: false, place: 0, line };
+      if (this.player && f.isPlayer) this.result = { won: false, place, line };
+      else if (standing <= 1 && this.player?.f.alive) this.result = { won: true, place: 1, line };
+      else if (standing <= 1 && !this.player) this.result = { won: false, place: 0, line };
       if (this.result) this.resultTime = this.time;
+      if (this.result?.won) this.player!.f.invulnerable = true;
     }
   }
 

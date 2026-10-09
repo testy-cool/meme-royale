@@ -25,6 +25,7 @@ export class Player {
   private slamPending = false; // airborne and about to slam into the ground
   private diveIn = 0; // seconds of hop left before the dive starts
   private readonly focus = new THREE.Vector3();
+  moved = 0; // pixels of mouse movement since the game last cleared it
 
   constructor(readonly f: Fighter, private readonly canvas: HTMLCanvasElement) {
     addEventListener('keydown', (e) => {
@@ -40,6 +41,7 @@ export class Player {
     addEventListener('mousemove', (e) => {
       // Chrome can report one huge jump right after the pointer locks; skip it.
       if (document.pointerLockElement !== this.canvas || Math.abs(e.movementX) + Math.abs(e.movementY) > 300) return;
+      this.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
       this.yaw -= e.movementX * SENSITIVITY;
       this.pitch = THREE.MathUtils.clamp(this.pitch - e.movementY * SENSITIVITY, -1.0, 0.4);
     });

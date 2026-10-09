@@ -26,7 +26,9 @@ const HOP = 8; // farthest one hop carries it
 const HOP_HEIGHT = 7;
 const QUAKE = 18; // grounded fighters this close to a landing are thrown
 export const CRUSH = 30; // damage to anyone under it when it lands
-const BEAT_IN = 0.5, BEAT_HOLD = 2.4, BEAT_OUT = 0.7; // the camera's look at it as it rises
+// The camera's look at it: turns in as it starts to rise, holds through the rise and a moment past
+// the end of the roar, then eases back.
+const BEAT_IN = 0.5, BEAT_END = RISE_TIME + ROAR_TIME + 0.2, BEAT_OUT = 0.8;
 
 type Phase = 'dormant' | 'rumble' | 'rising' | 'roar' | 'idle' | 'crouch' | 'air' | 'song' | 'flush' | 'gone';
 
@@ -220,6 +222,14 @@ function throughFog<M extends THREE.Material>(m: M): M {
 
 const GROUND = [new THREE.Plane(new THREE.Vector3(0, 1, 0), 0.02)]; // everything below ground stays hidden while it rises
 const smooth = (t: number) => t * t * (3 - 2 * t);
+
+/** The arrival shot's weight `t` seconds into the rise, if the player leaves the camera to it. */
+function beatAt(t: number): number {
+  if (t < BEAT_IN) return smooth(t / BEAT_IN);
+  if (t < BEAT_END) return 1;
+  return 1 - smooth(Math.min(1, (t - BEAT_END) / BEAT_OUT));
+}
+
 const v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
 
 export class Boss {
@@ -229,6 +239,7 @@ export class Boss {
   phase: Phase = 'dormant';
   private clock = 0; // seconds into the current phase
   private riseClock = -1; // seconds since it started rising, -1 before
+  private beatCut = -1; // riseClock when the player took the camera back, -1 if they have not
   private time = 0;
   private readonly from = new THREE.Vector3();
   readonly landing = new THREE.Vector3(); // where the current hop comes down
@@ -298,7 +309,7 @@ export class Boss {
 
   reset() {
     this.phase = 'dormant';
-    this.riseClock = -1;
+    this.riseClock = this.beatCut = -1;
     this.root.visible = this.marker.visible = this.cracks.visible = false;
     this.reachedVillage = false;
   }
@@ -321,7 +332,7 @@ export class Boss {
     this.yaw = Math.atan2(-spot.x, -spot.z); // facing the village
     this.phase = 'rumble';
     this.clock = 0;
-    this.riseClock = -1;
+    this.riseClock = this.beatCut = -1;
     this.reachedVillage = false;
     this.hopsToSong = 5;
     this.rampage = 0;
@@ -333,18 +344,28 @@ export class Boss {
     this.place();
   }
 
-  /** 0..1: how far the player's camera turns to watch it rise. A short beat at the start of the rise. */
+  /**
+   * 0..1: how far the player's camera turns to watch it arrive. It holds from the start of the rise
+   * to the end of the roar, unless the player takes the camera back sooner.
+   */
   beat(): number {
     const t = this.riseClock;
     if (t < 0) return 0;
-    if (t < BEAT_IN) return smooth(t / BEAT_IN);
-    if (t < BEAT_IN + BEAT_HOLD) return 1;
-    return 1 - smooth(Math.min(1, (t - BEAT_IN - BEAT_HOLD) / BEAT_OUT));
+    if (this.beatCut >= 0) return beatAt(this.beatCut) * (1 - smooth(Math.min(1, (t - this.beatCut) / BEAT_OUT)));
+    return beatAt(t);
   }
 
-  /** The point the camera beat looks at: its face, or the ground it is breaking out of. */
+  /** The player moved the mouse: the camera eases back to them now. */
+  cutBeat() {
+    if (this.riseClock >= 0 && this.beatCut < 0) this.beatCut = this.riseClock;
+  }
+
+  /**
+   * The point the camera beat looks at: the middle of what stands above the ground, so the whole
+   * toilet is in frame once it has risen.
+   */
   lookPoint(out: THREE.Vector3): THREE.Vector3 {
-    return out.set(this.pos.x, Math.max(6, this.pos.y + 25 * K), this.pos.z);
+    return out.set(this.pos.x, Math.max(6, (this.pos.y + BOSS_HEIGHT) * 0.5), this.pos.z);
   }
 
   /**
@@ -373,6 +394,27 @@ export class Boss {
     if (h < 28 * K && this.under(x, z, 0.3)) return true;
     const c = Math.cos(this.yaw), s = Math.sin(this.yaw), dx = x - this.pos.x, dz = z - this.pos.z;
     return Math.abs(dx * c - dz * s) < 7 * K && Math.abs(dx * s + dz * c) < 7 * K;
+  }
+
+  /**
+   * The box of ground the toilet covers, `margin` blocks generous, as [minX, maxX, minZ, maxZ]:
+   * the tank's corners and the bowl's oval, turned to its heading.
+   */
+  private footprint(margin: number): [number, number, number, number] {
+    // under() turns world offsets into its own frame; this turns its own frame back into the world.
+    const c = Math.cos(this.yaw), s = Math.sin(this.yaw), m = margin / K;
+    const box: [number, number, number, number] = [this.pos.x, this.pos.x, this.pos.z, this.pos.z];
+    const add = (dx: number, dz: number) => {
+      box[0] = Math.min(box[0], this.pos.x + dx);
+      box[1] = Math.max(box[1], this.pos.x + dx);
+      box[2] = Math.min(box[2], this.pos.z + dz);
+      box[3] = Math.max(box[3], this.pos.z + dz);
+    };
+    for (const lx of [-12.2 - m, 12.2 + m]) for (const lz of [-14.2 - m, -7.4 + m]) add((lx * c + lz * s) * K, (lz * c - lx * s) * K);
+    const a = 9.3 + m, b = 1.2 * a, ex = Math.hypot(a * c, b * s) * K, ez = Math.hypot(a * s, b * c) * K;
+    add(-ex, -ez);
+    add(ex, ez);
+    return box;
   }
 
   /** Whether the ground at (x, z) is under the toilet, `margin` blocks generous. */
@@ -545,9 +587,9 @@ export class Boss {
    */
   private flatten(fighters: Fighter[], fx: Fx, lift: THREE.Vector3, inland = false) {
     const broken: [number, number, number, THREE.Color][] = [];
-    const R = 18, px = this.pos.x, pz = this.pos.z;
-    for (let x = Math.floor(px - R); x <= Math.floor(px + R); x++)
-      for (let z = Math.floor(pz - R); z <= Math.floor(pz + R); z++) {
+    const px = this.pos.x, pz = this.pos.z, [x0, x1, z0, z1] = this.footprint(0.5);
+    for (let x = Math.floor(x0); x <= Math.floor(x1); x++)
+      for (let z = Math.floor(z0); z <= Math.floor(z1); z++) {
         if (!this.under(x + 0.5, z + 0.5, 0.5)) continue;
         for (let y = 0; y < HEIGHT; y++) {
           const color = removeBlock(x, y, z);

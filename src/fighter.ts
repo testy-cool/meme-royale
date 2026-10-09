@@ -81,6 +81,7 @@ export class Fighter {
   koHow: Harm = 'hit';
   koBy: Fighter | 'boss' | null = null;
   panic = false; // fleeing: runs with its arms up
+  invulnerable = false; // the winner, once the match is decided: nothing can take them out
   aim: Fighter | null = null; // the target the player's punch is locked onto (aim assist)
   bumpImmune = 0;
   hpShownFor = 0;
@@ -196,7 +197,7 @@ export class Fighter {
     this.lastHitBy = this.blame = this.koBy = null;
     this.blameAge = 99;
     this.calm = 0;
-    this.panic = false;
+    this.panic = this.invulnerable = false;
     this.aim = null;
     this.hpShownFor = 0;
     this.spinner.quaternion.identity();
