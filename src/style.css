@@ -1,0 +1,154 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #d6e8f7;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color: #fff;
+}
+
+#game {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 32px;
+  padding: 16px;
+  background: linear-gradient(rgba(20, 30, 45, 0.1), rgba(20, 30, 45, 0.5));
+  text-align: center;
+}
+
+.overlay[hidden],
+#hud[hidden],
+.ko[hidden] {
+  display: none;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(56px, 11vw, 136px);
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  /* a stepped block extrusion, Minecraft title style */
+  text-shadow: 0 4px 0 #3b3b3b, 0 8px 0 #2a2a2a, 0 12px 0 #1c1c1c, 0 18px 24px rgba(0, 0, 0, 0.45);
+}
+
+#play {
+  font: inherit;
+  font-size: 32px;
+  font-weight: 800;
+  color: #fff;
+  padding: 16px 72px;
+  border: 0;
+  border-bottom: 6px solid #2f7a1c;
+  border-radius: 4px;
+  background: #4fae32;
+  cursor: pointer;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.35);
+}
+
+#play:hover {
+  background: #5cc23c;
+}
+
+#play:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 4px;
+}
+
+.controls {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+}
+
+.hp {
+  position: fixed;
+  left: 24px;
+  bottom: 24px;
+  width: 280px;
+  height: 32px;
+  border-radius: 4px;
+  background: rgba(20, 20, 20, 0.6);
+  overflow: hidden;
+}
+
+.hp-fill {
+  height: 100%;
+  width: 100%;
+  background: #5bd15b;
+  transition: width 0.15s;
+}
+
+.hp-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding-left: 12px;
+  font-size: 18px;
+  font-weight: 800;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.slam {
+  position: fixed;
+  left: 320px;
+  bottom: 24px;
+  width: 64px;
+  height: 64px;
+  border-radius: 4px;
+  border: 3px solid rgba(255, 255, 255, 0.35);
+  background: rgba(20, 20, 20, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  font-size: 26px;
+  font-weight: 900;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.slam.ready {
+  border-color: #ffd54a;
+  color: #ffd54a;
+}
+
+.slam-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.slam span {
+  position: relative;
+}
+
+.ko {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 38%;
+  text-align: center;
+  font-size: 40px;
+  font-weight: 900;
+  text-shadow: 0 3px 0 #222, 0 6px 16px rgba(0, 0, 0, 0.5);
+}
