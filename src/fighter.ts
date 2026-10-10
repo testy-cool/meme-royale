@@ -1,39 +1,21 @@
 import * as THREE from 'three';
-import type { Look } from './cast';
-
-/** A faint pixel noise that gives flat colours a Minecraft texture. */
-const noise = (() => {
-  const c = document.createElement('canvas');
-  c.width = c.height = 8;
-  const g = c.getContext('2d')!;
-  for (let y = 0; y < 8; y++)
-    for (let x = 0; x < 8; x++) {
-      const v = 215 + Math.floor(Math.random() * 40);
-      g.fillStyle = `rgb(${v},${v},${v})`;
-      g.fillRect(x, y, 1, 1);
-    }
-  const t = new THREE.CanvasTexture(c);
-  t.magFilter = THREE.NearestFilter;
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-})();
-
-function painted(size: number, paint: (g: CanvasRenderingContext2D) => void): THREE.CanvasTexture {
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  paint(c.getContext('2d')!);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.anisotropy = 4;
-  return t;
-}
+import type { Gear, Kit } from './kit';
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const tmpQ = new THREE.Quaternion();
 const IDENTITY = new THREE.Quaternion();
+const LYING = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2); // carried across the shoulders
 
 /** What knocked a fighter out. */
 export type Harm = 'hit' | 'wall' | 'fall' | 'storm' | 'boss';
+
+/** A body that bowls over whoever it runs into above `speed`. */
+export interface Ram {
+  speed: number;
+  damage: number;
+  power: number;
+  verb: string; // for the kill feed, in place of "eliminated"
+}
 
 export const PUNCH_HIT_AT = 0.07; // seconds into the punch when the fist connects
 export const PUNCH_TIME = 0.26;
@@ -41,23 +23,25 @@ export const PUNCH_TIME = 0.26;
 export class Fighter {
   readonly root = new THREE.Group(); // at the feet: position, facing, squash
   private readonly spinner = new THREE.Group(); // tumbles around the body's centre
-  private readonly torso = new THREE.Group();
-  private readonly armL: THREE.Group;
-  private readonly armR: THREE.Group;
-  private readonly legL: THREE.Group;
-  private readonly legR: THREE.Group;
-  private readonly mats: THREE.MeshLambertMaterial[] = [];
   private readonly hpBar?: { sprite: THREE.Sprite; g: CanvasRenderingContext2D; tex: THREE.CanvasTexture; shown: number };
+  readonly gear: Gear;
 
   readonly height: number;
   readonly halfW: number;
+  name: string; // in the kill feed
+  speed: number; // what the kit says, unless a power changes it
+  power: number;
+  strength: number;
   readonly pos = new THREE.Vector3();
   readonly vel = new THREE.Vector3();
   readonly want = new THREE.Vector2(); // horizontal velocity the controller asks for
+  wantY = 0; // flyers: the vertical speed asked for
   yaw = 0;
   hp = 100;
   grounded = false;
   blocked = false; // walked into a wall this step
+  blockedAxis: 0 | 2 = 0; // which way that wall faces: x (0) or z (2)
+  blockedSign = 1; // and which way along that axis the body was pushing
 
   tumbling = false; // launched: no control until the body settles
   tumbleTime = 0;
@@ -77,73 +61,50 @@ export class Fighter {
   lastHitBy: Fighter | null = null;
   blame: Fighter | 'boss' | null = null; // who last hurt this fighter, credited if they go down soon after
   blameAge = 99; // seconds since then
+  blameVerb: string | null = null; // how they did it, when it was not a plain hit
   calm = 0; // seconds since any damage: after a while, health comes back
   koHow: Harm = 'hit';
   koBy: Fighter | 'boss' | null = null;
+  koVerb: string | null = null;
   panic = false; // fleeing: runs with its arms up
   invulnerable = false; // the winner, once the match is decided: nothing can take them out
   aim: Fighter | null = null; // the target the player's punch is locked onto (aim assist)
   bumpImmune = 0;
   hpShownFor = 0;
-  private walkPhase = 0;
+
+  // What the kits' powers do to bodies.
+  busy = false; // a power is steering the body: no control
+  stun = 0; // seconds left unable to act
+  flat = 0; // seconds left squashed flat like a pancake
+  timeScale = 1; // the body's own slow motion; the world keeps its speed
+  flightLock = 0; // flyers: seconds before they can take off again after being knocked down
+  ram: Ram | null = null;
+  heldBy: Fighter | null = null; // carried overhead by this fighter
+  lifting = false; // carrying something overhead
+  bowOut = false;
+  drawn = 0; // how far the bowstring is drawn, 0..1
+  readonly aimDir = new THREE.Vector3(0, 0, 1); // where powers and throws go: the camera's aim, or the bot's target
+  readonly goal = new THREE.Vector3(); // where powers that land somewhere should land
+  foe: Fighter | null = null; // who a bot is after, so its friends can join in
+  readonly friends = new Set<Fighter>(); // allies: they never hurt each other
   private time = 0;
+  private wasFlat = false;
 
-  constructor(readonly look: Look, readonly isPlayer: boolean, scene: THREE.Scene) {
-    const s = look.scale;
-    this.height = 1.84 * s;
-    this.halfW = 0.32 * s;
+  constructor(readonly kit: Kit, readonly isPlayer: boolean, readonly scene: THREE.Scene) {
+    this.height = kit.height;
+    this.halfW = kit.halfW;
+    this.name = kit.name;
+    this.speed = kit.speed;
+    this.power = kit.power;
+    this.strength = kit.strength ?? 1;
+    this.gear = kit.create(this);
 
-    const solid = (color: string) => {
-      const m = new THREE.MeshLambertMaterial({ color, map: noise });
-      this.mats.push(m);
-      return m;
-    };
-    const image = (size: number, paint: (g: CanvasRenderingContext2D) => void) => {
-      const m = new THREE.MeshLambertMaterial({ map: painted(size, paint) });
-      this.mats.push(m);
-      return m;
-    };
-    const skin = solid(look.skin), hair = solid(look.hair), shirt = solid(look.shirt), pants = solid(look.pants);
-    const limb = (w: number, h: number, d: number, mat: THREE.Material | THREE.Material[], x: number, y: number) => {
-      const pivot = new THREE.Group();
-      pivot.position.set(x, y, 0);
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-      mesh.position.y = -h / 2;
-      mesh.castShadow = true;
-      pivot.add(mesh);
-      return pivot;
-    };
-
-    // Character faces +z. Its right-hand side is -x.
-    this.legL = limb(0.24, 0.62, 0.26, pants, 0.13, 0.62);
-    this.legR = limb(0.24, 0.62, 0.26, pants, -0.13, 0.62);
-    this.torso.position.y = 0.62;
-    const chest = look.chest ? image(64, look.chest) : shirt;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.62, 0.3), [shirt, shirt, shirt, shirt, chest, shirt]);
-    body.position.y = 0.31;
-    body.castShadow = true;
-    this.armL = limb(0.2, 0.6, 0.22, skin, 0.36, 0.58);
-    this.armR = limb(0.2, 0.6, 0.22, skin, -0.36, 0.58);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), [skin, skin, hair, skin, image(128, look.face), hair]);
-    head.position.y = 0.92;
-    head.castShadow = true;
-    this.torso.add(body, this.armL, this.armR, head);
-    if (look.ears) {
-      const [outer, inner] = look.ears;
-      const o = solid(outer), i = solid(inner);
-      for (const x of [-0.19, 0.19]) {
-        const ear = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.18, 0.08), [o, o, o, o, i, o]);
-        ear.position.set(x, 1.3, 0.06);
-        this.torso.add(ear);
-      }
-    }
-
-    // Parts hang from the spinner, which sits at the body's centre so tumbles rotate around it.
-    const parts = new THREE.Group();
-    parts.position.y = -0.92;
-    parts.add(this.legL, this.legR, this.torso);
-    this.spinner.position.y = 0.92;
-    this.spinner.add(parts);
+    // The model hangs from the spinner, which sits at the body's centre so tumbles rotate around it.
+    const holder = new THREE.Group();
+    holder.position.y = -this.height / 2;
+    holder.add(this.gear.model.root);
+    this.spinner.position.y = this.height / 2;
+    this.spinner.add(holder);
     this.root.add(this.spinner);
     scene.add(this.root);
 
@@ -164,6 +125,16 @@ export class Fighter {
     return this.koTimer < 0 && !this.out;
   }
 
+  /** Flying right now: a flyer that nothing has knocked out of the air. */
+  get flies() {
+    return this.kit.move === 'fly' && this.alive && !this.tumbling && this.stun <= 0 && this.flightLock <= 0 && !this.heldBy;
+  }
+
+  /** Free to move and fight. */
+  get free() {
+    return this.alive && !this.tumbling && !this.busy && this.stun <= 0 && !this.heldBy;
+  }
+
   centre(out: THREE.Vector3) {
     return out.copy(this.pos).setY(this.pos.y + this.height / 2);
   }
@@ -172,12 +143,20 @@ export class Fighter {
     return out.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
   }
 
-  /** Sends the body tumbling head-first along `dir` until it settles. */
-  launch(dir: THREE.Vector3) {
-    this.tumbling = true;
-    this.tumbleTime = 0;
+  /** Stops anything under way: punches, a telegraphed punch, and every power. */
+  interrupt() {
     this.punchT = -1;
     this.windup = 0;
+    for (const p of this.gear.powers) p.cancel(this);
+  }
+
+  /** Sends the body tumbling head-first along `dir` until it settles. */
+  launch(dir: THREE.Vector3) {
+    this.interrupt();
+    this.tumbling = true;
+    this.tumbleTime = 0;
+    this.heldBy = null;
+    this.flightLock = 1.5;
     // Spin around the horizontal axis across the flight path, expressed in the body's own frame.
     this.spinAxis.set(dir.z, 0, -dir.x).normalize().applyAxisAngle(Y_AXIS, -this.yaw);
     this.spinAxis.x += (Math.random() - 0.5) * 0.6;
@@ -185,97 +164,84 @@ export class Fighter {
     this.spinRate = 8 + Math.random() * 6;
   }
 
+  /** Squashes the body flat for `seconds`, unable to act. */
+  pancake(seconds: number) {
+    this.interrupt();
+    this.stun = Math.max(this.stun, seconds);
+    this.flat = Math.max(this.flat, seconds);
+    this.vel.x = this.vel.z = 0;
+  }
+
   respawn(at: THREE.Vector3) {
+    this.gear.clear?.(); // first, so nothing from the last life acts on this one
     this.pos.copy(at);
     this.vel.set(0, 0, 0);
     this.hp = 100;
-    this.tumbling = false;
+    this.tumbling = this.grounded = this.blocked = false; // until the first step says otherwise
     this.koTimer = -1;
     this.out = false;
-    this.punchT = -1;
-    this.windup = 0;
     this.lastHitBy = this.blame = this.koBy = null;
     this.blameAge = 99;
     this.calm = 0;
     this.panic = this.invulnerable = false;
-    this.aim = null;
+    this.aim = this.foe = null;
     this.hpShownFor = 0;
+    this.busy = this.lifting = this.bowOut = false;
+    this.stun = this.flat = this.flightLock = this.wantY = this.drawn = 0;
+    this.timeScale = 1;
+    this.heldBy = null;
+    this.ram = null;
+    this.interrupt();
+    for (const p of this.gear.powers) p.wait = 0;
+    this.name = this.kit.name;
+    this.speed = this.kit.speed;
+    this.power = this.kit.power;
+    this.strength = this.kit.strength ?? 1;
+    this.gear.reset?.();
     this.spinner.quaternion.identity();
     this.root.visible = true;
   }
 
+  /** Takes the body off the island: knocked out and gone, or left out of this match. */
   hide() {
+    this.gear.clear?.();
     this.root.visible = false;
     if (this.hpBar) this.hpBar.sprite.visible = false;
   }
 
   /** Moves the model to the simulated body and animates it. */
   render(dt: number, frozen: boolean) {
-    this.time += dt;
+    const own = dt * this.timeScale; // a body in slow motion animates slowly too
+    this.time += own;
     this.flash = Math.max(0, this.flash - dt);
     this.hpShownFor = Math.max(0, this.hpShownFor - dt);
 
-    this.squashVel += (-170 * this.squash - 13 * this.squashVel) * dt;
-    this.squash += this.squashVel * dt;
-    const s = THREE.MathUtils.clamp(this.squash, -0.35, 0.45), k = this.look.scale;
+    if (this.wasFlat && this.flat <= 0) this.squashVel = -9; // pops back up out of the pancake
+    this.wasFlat = this.flat > 0;
+    this.squashVel += (-170 * this.squash - 13 * this.squashVel) * own;
+    this.squash += this.squashVel * own;
+    const s = THREE.MathUtils.clamp(this.squash, -0.35, 0.45);
+    let wide = 1 + s * 0.45, tall = 1 - s * 0.55;
+    if (this.flat > 0) {
+      const wobble = Math.sin(this.time * 9) * 0.03;
+      wide = 1.5 + wobble;
+      tall = 0.16 - wobble;
+    }
     this.root.position.copy(this.pos);
     if (frozen && this.flash > 0) this.root.position.x += (Math.random() - 0.5) * 0.14;
     this.root.rotation.y = this.yaw;
-    this.root.scale.set(k * (1 + s * 0.45), k * (1 - s * 0.55), k * (1 + s * 0.45));
+    this.root.scale.set(wide, tall, wide);
 
     if (this.tumbling) {
-      this.spinner.quaternion.multiply(tmpQ.setFromAxisAngle(this.spinAxis, this.spinRate * dt));
-      this.spinRate *= 1 - Math.min(1, dt * (this.grounded ? 4 : 0.3));
+      this.spinner.quaternion.multiply(tmpQ.setFromAxisAngle(this.spinAxis, this.spinRate * own));
+      this.spinRate *= 1 - Math.min(1, own * (this.grounded ? 4 : 0.3));
     } else {
-      this.spinner.quaternion.slerp(IDENTITY, 1 - Math.exp(-14 * dt));
+      this.spinner.quaternion.slerp(this.heldBy ? LYING : IDENTITY, 1 - Math.exp(-14 * own));
     }
-
-    const speed = Math.hypot(this.vel.x, this.vel.z);
-    const stride = this.grounded && !this.tumbling ? Math.min(1, speed / 5) : 0;
-    this.walkPhase += dt * speed * 1.9;
-    const swing = Math.sin(this.walkPhase) * 0.85 * stride;
-    this.legL.rotation.set(swing, 0, 0);
-    this.legR.rotation.set(-swing, 0, 0);
-    this.armL.rotation.set(-swing * 0.9, 0, 0.06);
-    this.armR.rotation.set(swing * 0.9, 0, -0.06);
-    this.armL.position.z = this.armR.position.z = 0;
-    this.torso.rotation.y = 0;
-
-    if (this.tumbling) {
-      const t = this.time;
-      this.armL.rotation.set(Math.sin(t * 23) * 1.3, 0, 0.9);
-      this.armR.rotation.set(Math.cos(t * 19) * 1.3, 0, -0.9);
-      this.legL.rotation.set(Math.sin(t * 17) * 0.8, 0, 0.3);
-      this.legR.rotation.set(-Math.sin(t * 17) * 0.8, 0, -0.3);
-    } else if (!this.grounded) {
-      this.legL.rotation.x = -0.4;
-      this.legR.rotation.x = 0.25;
-      this.armL.rotation.z = 0.6;
-      this.armR.rotation.z = -0.6;
-    } else if (this.panic) {
-      const t = this.time * 15;
-      this.armL.rotation.set(-2.75 + Math.sin(t) * 0.35, 0, 0.3);
-      this.armR.rotation.set(-2.75 + Math.cos(t) * 0.35, 0, -0.3);
-    }
-
-    if (this.windup > 0) {
-      const w = Math.min(1, this.windup / 0.3);
-      this.armR.rotation.set(1.4 * w, 0, -0.3 * w);
-      this.torso.rotation.y = -0.45 * w;
-    }
-    if (this.punchT >= 0) {
-      const t = this.punchT, arm = this.punchArm ? this.armL : this.armR, side = this.punchArm ? -1 : 1;
-      let r: number, reach: number;
-      if (t < 0.04) { r = 0.6 * (t / 0.04); reach = 0; }
-      else if (t < 0.09) { const u = (t - 0.04) / 0.05; r = 0.6 - 2.35 * u; reach = u; }
-      else { const u = (t - 0.09) / (PUNCH_TIME - 0.09); r = -1.75 * (1 - u); reach = 1 - u; }
-      arm.rotation.set(r, 0, 0);
-      arm.position.z = 0.18 * reach;
-      this.torso.rotation.y = side * 0.4 * reach;
-    }
+    this.gear.model.animate(this, own);
 
     const glow = Math.min(1, this.flash / 0.1);
-    for (const m of this.mats) m.emissive.setScalar(glow * 0.9);
+    for (const m of this.gear.model.mats) m.emissive.setScalar(glow * 0.9);
 
     if (this.hpBar) {
       const bar = this.hpBar;

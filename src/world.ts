@@ -19,6 +19,13 @@ export function isSolid(x: number, y: number, z: number): boolean {
   return inGrid(x, y, z) && grid[cellIndex(x, y, z)] !== 0;
 }
 
+/** The height of the top of whatever stands in column (x, z): 0 on open ground. */
+export function columnTop(x: number, z: number): number {
+  const cx = Math.floor(x), cz = Math.floor(z);
+  for (let y = HEIGHT - 1; y >= 0; y--) if (isSolid(cx, y, cz)) return y + 1;
+  return 0;
+}
+
 // Seeded random, so the village looks the same on every visit.
 let seed = 20261009;
 function rand(): number {

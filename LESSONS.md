@@ -197,3 +197,72 @@ The worker appends short, durable lessons here: gotchas, decisions, and deploy s
 - CDP `Input.dispatchMouseEvent` moves under pointer lock arrive with `movementX`, so a browser
   check can test "a mouse move cancels the shot" with real input.
 - To make a random spawn choice deterministic in the probe, stub `Math.random` around the one call.
+
+## M3 character kits, part 1 (2026-10-10)
+
+### The kit system
+- A character is one module in `src/kits/` whose default export is a `Kit`: body size, movement
+  (walk, fly or roll), stats, a model builder and per-fighter powers with a bot `wants()`. The roster
+  finds them with `import.meta.glob('./kits/*.ts', { eager: true })`, so adding one touches nothing
+  else. The probe checks that no shared module names a character.
+- Shared behaviour is data on the fighter, not per-character code in combat: `busy` (a power steers
+  the body), `stun` and `flat` (pancaked), `timeScale` (the cow's own slow motion: scale the
+  integration step, keep timers on world time), `ram` (bowl over whoever you hit above a speed),
+  `friends` (allies), `heldBy`/`lifting`. `hurt()` and `hit()` refuse allies and self-hits.
+- Flyers must not shove other bodies. Nyan Cat pushed its target along in front of it, so its trail
+  never touched anyone.
+
+### Probing
+- Vite's `runnerImport` deadlocks on a circular import between probe modules. Keep shared helpers in
+  a module both import (`scripts/probe-lib.ts`).
+- `import.meta.glob(..., { query: '?raw', import: 'default', eager: true })` lets the probe read the
+  game's sources as text with no Node types.
+- Put the whole probe under a fixed seed, and give each scene its own too: two runs are now
+  byte-identical. Seeded runs over several spawn spots exposed real bugs a single random spot hid.
+- Write probe output to a file. A killed process lost its piped output, and in `a && OUT=...; grep x $OUT`
+  a failed `a` leaves `$OUT` empty, so grep reads stdin and hangs. Quote paths and give grep `< /dev/null`.
+
+### Bots getting about
+- `respawn()` must clear `grounded` and `blocked`. A bot respawned in mid-air read the last match's
+  flags on its first frame and hopped in mid-air (1 run in 40).
+- A rolling ball bounces off a wall instead of pressing on it, so a "blocked for 0.3 s" timer never
+  fires. Count bumps. Its collision box must also be under 1 block wide, or 1-block gaps are walls.
+- Random left/right detours could not get a bot out of the stone wall and hay corner east of the
+  village. When stuck, bots now run a breadth-first search over the island's columns (`src/paths.ts`)
+  and follow it, skipping ahead only where the body's whole footprint, not its centre line, is clear.
+- Hop only up a one-block step: hopping into a two-high wall just wastes the bot's time in the air.
+
+### Posed browser screenshots
+- Arm the freeze watcher before the action and wait afterwards. A helper that armed and waited in one
+  call blocked the action until Gigachad's arms got tired and threw on their own.
+- `memeRoyale.shot = { from, at }` holds the camera for a screenshot. Pick `from` by searching yaws
+  around the subject for a clear line of sight: the chase camera ended up behind trees and through
+  the well. Hide the player's model only when the player is not the subject.
+- Hold bystanders with `stun` (it does not change how they look), and look bots up by `kit.name`:
+  Wojak's display name changes when he snaps.
+- The bow's crosshair sits over the right shoulder, parallel to the player's facing, so a script must
+  aim from the camera's position to put the crosshair on a target.
+- A thrown body starts inside the thrower's box and bowled him over, halving the throw. The browser
+  caught it; the probe now checks the throw speed and the thrower's health.
+
+### Balance
+- Allies drawn as a pair dominated: Orang's rolling hits and Meme Man's crater ended 3 of 16
+  bot-only matches before 2:00. Tallying knockouts by killer and verb over 16 to 24 seeded matches
+  pointed straight at them. Softer rolling hits (5 damage, needing speed 6), a rarer, weaker strike
+  and crater, and allies ganging up less brought the median back to about 3:20.
+
+## M3 part 1 review fixes (2026-10-10)
+- Anything a kit puts in the world outside its fighter (the cow's ghosts, Meme Man's charts and
+  scorch mark, a carried block) needs a way to go when the fighter does. A benched or knocked-out
+  fighter is not stepped or rendered, so effects that age in its step or animation froze in place
+  and lasted into the next match. `Gear.clear()` now runs on `hide()` and `respawn()`, and each kit
+  puts its things away there without letting them act.
+- Clear projectiles after everyone is respawned, not before. Respawning the player interrupted the
+  grab, which dropped its block as a new projectile into the fresh match.
+- A function handed a module's scratch vector must copy it before using that scratch vector itself.
+  The chart built its points with `v1` while its caller passed `v1` as an endpoint, so the red chart
+  ended at (0, 0, 0). Copy the endpoints first, and give helpers their own temporaries.
+- To probe "a restart leaves nothing behind" without knowing what each kit owns, snapshot the set
+  of visible top-level scene objects right after a clean start, run every power, restart with the
+  same seed, and diff the two sets. Re-running the probe on the unfixed code (`git stash push -- src`)
+  showed the check catching all three bugs.

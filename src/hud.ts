@@ -1,13 +1,30 @@
 const FEED_LINES = 4;
 const FEED_LIFE = 6; // seconds a kill feed line stays, the last one fading out
 
-/** The in-game HUD: health, the slam cooldown, players left, the kill feed, and a purple edge while in the storm. */
+/** What the HUD shows, read off the game each frame. */
+export interface HudState {
+  hp: number;
+  cooling: number[]; // per power key, the cooldown still to wait: 1 (just used) to 0 (ready)
+  playersLeft: number;
+  inStorm: boolean;
+  bow: boolean; // out
+  hasBow: boolean;
+  arrows: number;
+  draw: number; // 0..1
+}
+
+/**
+ * The in-game HUD: health, the two power keys and their cooldowns, fists and the bow, the bow's
+ * crosshair, players left, the kill feed, and a purple edge while in the storm.
+ */
 export class Hud {
   private readonly root = document.getElementById('hud')!;
   private readonly hpFill = this.root.querySelector<HTMLElement>('.hp-fill')!;
   private readonly hpText = this.root.querySelector<HTMLElement>('.hp-text')!;
-  private readonly slam = this.root.querySelector<HTMLElement>('.slam')!;
-  private readonly slamFill = this.root.querySelector<HTMLElement>('.slam-fill')!;
+  private readonly keys = [...this.root.querySelectorAll<HTMLElement>('.key')];
+  private readonly slots = [...this.root.querySelectorAll<HTMLElement>('.slot')];
+  private readonly arrows = this.root.querySelector<HTMLElement>('.arrows')!;
+  private readonly crosshair = this.root.querySelector<HTMLElement>('.crosshair')!;
   private readonly left = this.root.querySelector<HTMLElement>('.left')!;
   private readonly feed = this.root.querySelector<HTMLElement>('.feed')!;
   private readonly storm = this.root.querySelector<HTMLElement>('.storm-edge')!;
@@ -34,8 +51,7 @@ export class Hud {
     while (this.lines.length > FEED_LINES) this.lines.shift()!.el.remove();
   }
 
-  /** `slamLeft` is the cooldown still to wait, from 1 (just used) to 0 (ready). */
-  update(hp: number, slamLeft: number, playersLeft: number, inStorm: boolean) {
+  update(s: HudState) {
     const now = performance.now();
     for (let i = this.lines.length - 1; i >= 0; i--) {
       const age = (now - this.lines[i].born) / 1000;
@@ -46,16 +62,28 @@ export class Hud {
         this.lines[i].el.classList.add('fading');
       }
     }
-    const hpRounded = Math.ceil(hp), slamPct = Math.ceil(slamLeft * 20) * 5;
-    const key = `${hpRounded}|${slamPct}|${playersLeft}|${inStorm}`;
+    this.crosshair.hidden = !s.bow;
+    if (s.bow) this.crosshair.style.setProperty('--gap', `${Math.round(14 - 9 * s.draw)}px`);
+    const hpRounded = Math.ceil(hp(s.hp)), cooling = s.cooling.map((c) => Math.ceil(c * 20) * 5);
+    const key = `${hpRounded}|${cooling.join(',')}|${s.playersLeft}|${s.inStorm}|${s.bow}|${s.hasBow}|${s.arrows}`;
     if (key === this.shown) return;
     this.shown = key;
     this.hpFill.style.width = `${hpRounded}%`;
     this.hpFill.style.background = hpRounded > 50 ? '#5bd15b' : hpRounded > 25 ? '#f2c94c' : '#ef5350';
     this.hpText.textContent = String(hpRounded);
-    this.slamFill.style.height = `${slamPct}%`;
-    this.slam.classList.toggle('ready', slamPct === 0);
-    this.left.textContent = `${playersLeft} left`;
-    this.storm.classList.toggle('on', inStorm);
+    this.keys.forEach((el, i) => {
+      const pct = cooling[i] ?? 0;
+      el.hidden = i >= cooling.length;
+      el.querySelector<HTMLElement>('.key-fill')!.style.height = `${pct}%`;
+      el.classList.toggle('ready', pct === 0);
+    });
+    this.slots[0].classList.toggle('on', !s.bow);
+    this.slots[1].classList.toggle('on', s.bow);
+    this.slots[1].hidden = !s.hasBow;
+    this.arrows.textContent = String(s.arrows);
+    this.left.textContent = `${s.playersLeft} left`;
+    this.storm.classList.toggle('on', s.inStorm);
   }
 }
+
+const hp = (n: number) => Math.max(0, n);

@@ -1,12 +1,11 @@
 import * as THREE from 'three';
 import './style.css';
-import { PLAYER } from './cast';
-import { SLAM_COOLDOWN } from './combat';
 import { Fighter } from './fighter';
 import { Fx } from './fx';
 import { Hud } from './hud';
 import { Match } from './match';
 import { Player } from './player';
+import { PLAYER_KIT } from './roster';
 import { buildWorld, isSolid } from './world';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -28,7 +27,7 @@ const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 1200);
 const env = buildWorld(scene, renderer.capabilities.getMaxAnisotropy());
 const fx = new Fx(scene);
 const hud = new Hud();
-const player = new Player(new Fighter(PLAYER, true, scene), canvas);
+const player = new Player(new Fighter(PLAYER_KIT, true, scene), canvas);
 const match = new Match(scene, fx, player);
 
 type State = 'title' | 'playing' | 'paused' | 'over';
@@ -124,7 +123,11 @@ const blockedByBoss = (x: number, y: number, z: number) => match.boss.inside(x, 
 
 let last = performance.now(), orbit = 0;
 // Read by the browser checks: frame rate, state, the fighters, the match, the camera and the blocks.
-const debug = { fps: 60, state: state as State, fighters: match.fighters, player, fx, camera, match, isSolid };
+// A check can also hold the camera at a pose of its own (`shot`) to frame a posed screenshot.
+const debug = {
+  fps: 60, state: state as State, fighters: match.fighters, player, fx, camera, match, isSolid, THREE,
+  shot: null as null | { from: THREE.Vector3; at: THREE.Vector3 },
+};
 (window as unknown as { memeRoyale: typeof debug }).memeRoyale = debug;
 
 function frame(t: number) {
@@ -161,14 +164,27 @@ function frame(t: number) {
     if (look.weight === 0) player.moved = 0;
     if (look.weight > 0) match.boss.lookPoint(lookAt);
     player.updateCamera(camera, real, look, blockedByBoss);
+    if (debug.shot) {
+      camera.position.copy(debug.shot.from);
+      camera.lookAt(debug.shot.at);
+    }
     fx.focus.copy(player.f.pos);
   }
   env.update(fx.focus, camera, dt);
   fx.updateCamera(camera, real);
   for (const line of match.feed.splice(0)) hud.notice(line.text, line.you);
   if (state === 'playing' || state === 'paused') {
-    const inStorm = player.f.alive && match.storm.dps > 0 && match.storm.outside(player.f.pos.x, player.f.pos.z) > 0;
-    hud.update(player.f.hp, player.slamCooldown / SLAM_COOLDOWN, match.left, inStorm);
+    const f = player.f, inStorm = f.alive && match.storm.dps > 0 && match.storm.outside(f.pos.x, f.pos.z) > 0;
+    hud.update({
+      hp: f.hp,
+      cooling: f.gear.powers.map((p) => (p.active ? 0 : Math.max(0, p.wait) / p.cooldown)),
+      playersLeft: match.left,
+      inStorm,
+      bow: f.alive && f.bowOut && state === 'playing',
+      hasBow: player.hasBow,
+      arrows: player.arrows,
+      draw: player.draw,
+    });
   }
   renderer.render(scene, camera);
 

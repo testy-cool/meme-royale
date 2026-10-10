@@ -1,13 +1,12 @@
 import * as THREE from 'three';
 import { Fighter, PUNCH_HIT_AT, PUNCH_TIME, type Harm } from './fighter';
+import type { Arena } from './kit';
 import { isSolid, removeBlock } from './world';
 import type { Fx } from './fx';
 
 export const STEP = 1 / 120; // fighters step at a fixed 120 Hz so fast bodies do not tunnel through walls
-export const SLAM_COOLDOWN = 4;
-const GRAVITY = 30;
+export const GRAVITY = 30;
 const SMASH_SPEED = 8.5; // bodies faster than this break through walls instead of stopping
-const SLAM_RADIUS = 9;
 const PLAYER_REACH = 2.7;
 export const AIM_REACH = 3.4; // the player's punch locks onto a target this close inside a narrow cone
 
@@ -20,13 +19,22 @@ const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3
 /** Fighters knocked out since the match last looked, in order. */
 export const knockouts: Fighter[] = [];
 
-/** Advances one body by one fixed step: control, gravity, voxel collisions and wall smashing. */
+/**
+ * Advances one body by one fixed step: control, gravity, voxel collisions and wall smashing. Flyers
+ * hold their height until something knocks them down; rollers gather speed slowly and coast. A body
+ * in slow motion covers less ground per step, but its timers keep the world's time.
+ */
 export function stepBody(f: Fighter, fx: Fx) {
-  const dt = STEP, v = f.vel;
-  f.bumpImmune -= dt;
-  f.blameAge += dt;
-  f.calm += dt;
-  if (f.calm > RECOVER_AFTER && f.alive && f.hp < 100) f.hp = Math.min(100, f.hp + RECOVER_RATE * dt);
+  const dt = STEP * f.timeScale, v = f.vel;
+  f.bumpImmune -= STEP;
+  f.blameAge += STEP;
+  f.calm += STEP;
+  if (f.stun > 0) f.stun -= STEP;
+  if (f.flat > 0) f.flat -= STEP;
+  if (f.flightLock > 0 && !f.tumbling) f.flightLock -= STEP;
+  if (f.calm > RECOVER_AFTER && f.alive && f.hp < 100) f.hp = Math.min(100, f.hp + RECOVER_RATE * STEP);
+  if (f.heldBy) return; // carried overhead: the carrier moves the body
+  const flying = f.flies;
   if (f.tumbling) {
     f.tumbleTime += dt;
     const speed = Math.hypot(v.x, v.z);
@@ -36,12 +44,14 @@ export function stepBody(f: Fighter, fx: Fx) {
       v.z *= k;
     }
     if (f.alive && f.grounded && f.tumbleTime > 0.4 && speed < 1.5) f.tumbling = false;
-  } else {
-    const accel = (f.grounded ? 70 : 24) * dt;
-    v.x += THREE.MathUtils.clamp(f.want.x - v.x, -accel, accel);
-    v.z += THREE.MathUtils.clamp(f.want.y - v.z, -accel, accel);
+  } else if (!f.busy) {
+    const roll = f.kit.move === 'roll', still = f.stun > 0 || !f.alive;
+    const accel = (flying ? 30 : roll ? (f.grounded ? 14 : 4) : f.grounded ? 70 : 24) * dt;
+    v.x += THREE.MathUtils.clamp((still ? 0 : f.want.x) - v.x, -accel, accel);
+    v.z += THREE.MathUtils.clamp((still ? 0 : f.want.y) - v.z, -accel, accel);
   }
-  v.y = Math.max(v.y - GRAVITY * dt, -55);
+  if (!flying) v.y = Math.max(v.y - GRAVITY * dt, -55);
+  else if (!f.busy) v.y += THREE.MathUtils.clamp(f.wantY - v.y, -30 * dt, 30 * dt);
   f.grounded = false;
   f.blocked = false;
   move(f, 1, v.y * dt, fx);
@@ -102,12 +112,19 @@ function move(f: Fighter, axis: 0 | 1 | 2, d: number, fx: Fx) {
     if (speed > 13) land(f, speed, fx);
   } else if (axis !== 1) {
     f.blocked = true;
+    f.blockedAxis = axis;
+    f.blockedSign = d > 0 ? 1 : -1;
   }
-  const bounce = f.tumbling && speed > 4 ? 0.38 : 0;
+  // Tumbling bodies bounce; so do balls, off walls and off hard landings.
+  const ball = f.kit.move === 'roll' && !f.tumbling;
+  const bounce = f.tumbling && speed > 4 ? 0.38 : ball && axis !== 1 && speed > 2 ? 0.55 : ball && d < 0 && speed > 7 ? 0.3 : 0;
   f.vel.setComponent(axis, -f.vel.getComponent(axis) * bounce);
 }
 
-/** A fast body hit a wall: the wall section bursts into chunks and the body carries on through. */
+/**
+ * A fast body hit a wall: the wall section bursts into chunks and the body carries on through. It
+ * hurts, unless the body is ramming on purpose.
+ */
 function smash(f: Fighter, fx: Fx) {
   const centre = f.centre(v1);
   const at = v3.copy(f.vel).normalize().multiplyScalar(f.halfW + 0.6).add(centre);
@@ -136,7 +153,7 @@ function smash(f: Fighter, fx: Fx) {
   f.squashVel = 6;
   fx.dust(at, 8, 4);
   fx.shake(0.4, at);
-  hurt(f, 4 + broken * 0.5, null, fx, 'wall');
+  if (!f.ram) hurt(f, 4 + broken * 0.5, null, fx, 'wall');
 }
 
 function land(f: Fighter, speed: number, fx: Fx) {
@@ -145,8 +162,11 @@ function land(f: Fighter, speed: number, fx: Fx) {
   if (speed > 20) fx.shake(0.25, f.pos);
 }
 
-export function hurt(f: Fighter, dmg: number, by: Fighter | 'boss' | null, fx: Fx, how: Harm = 'hit') {
-  if (!f.alive || f.invulnerable) return;
+/** Damage from `by`. Allies never hurt each other, and the kit may soften a blow (or take note of it). */
+export function hurt(f: Fighter, dmg: number, by: Fighter | 'boss' | null, fx: Fx, how: Harm = 'hit', verb: string | null = null) {
+  if (!f.alive || f.invulnerable || (by && by !== 'boss' && f.friends.has(by))) return;
+  dmg = f.gear.hurt?.(dmg, by) ?? dmg;
+  if (dmg <= 0) return;
   f.hp = Math.max(0, f.hp - dmg);
   f.hpShownFor = 3;
   f.calm = 0;
@@ -154,6 +174,7 @@ export function hurt(f: Fighter, dmg: number, by: Fighter | 'boss' | null, fx: F
     if (by !== 'boss') f.lastHitBy = by;
     f.blame = by;
     f.blameAge = 0;
+    f.blameVerb = verb;
   }
   if (f.hp <= 0) knockOut(f, fx, how);
 }
@@ -162,29 +183,35 @@ export function hurt(f: Fighter, dmg: number, by: Fighter | 'boss' | null, fx: F
 export function knockOut(f: Fighter, fx: Fx, how: Harm) {
   f.koHow = how;
   f.koBy = how !== 'storm' && f.blameAge < BLAME_TIME ? f.blame : null;
+  f.koVerb = how === 'hit' && f.koBy ? f.blameVerb : null;
   knockouts.push(f);
   f.hp = 0;
   f.koTimer = 2.4;
+  f.interrupt();
   f.tumbling = true;
-  f.windup = 0;
-  f.punchT = -1;
+  f.heldBy = null;
   fx.shake(0.3, f.pos);
 }
 
-/** A hit: damage, a launch that grows as the target gets hurt, hit-stop, shake, flash and squash. */
-function applyHit(attacker: Fighter, t: Fighter, dir: THREE.Vector3, dmg: number, power: number, fx: Fx) {
-  hurt(t, dmg, attacker, fx);
+/**
+ * A blow from `by` along `dir`: damage, a launch that grows as the target gets hurt, hit-stop, shake,
+ * flash and squash. Anything in the air is knocked out of it. Returns false for an ally (who is spared)
+ * and for the attacker itself.
+ */
+export function hit(by: Fighter, t: Fighter, dir: THREE.Vector3, dmg: number, power: number, fx: Fx, verb: string | null = null): boolean {
+  if (t === by || t.friends.has(by)) return false;
+  hurt(t, dmg, by, fx, 'hit', verb);
   const ko = !t.alive;
   const k = Math.min(2.6, power * (1 + (1 - t.hp / 100) * 1.3) * (ko ? 1.5 : 1));
   // Bots trading blows fly less far than anyone fighting the player, or they ring each other out in a minute.
-  const out = attacker.isPlayer || t.isPlayer ? 15 : 8;
+  const out = by.isPlayer || t.isPlayer ? 15 : 8;
   t.vel.set(dir.x * out * k, 6 + 4 * k, dir.z * out * k);
   t.launch(dir);
   t.grounded = false;
   t.squashVel = 7;
   t.flash = 0.12;
   const big = ko || power > 1.2;
-  if (attacker.isPlayer || t.isPlayer) {
+  if (by.isPlayer || t.isPlayer) {
     fx.hitStop(big ? 0.1 : 0.06);
     fx.shake(big ? 0.75 : 0.5);
   } else {
@@ -192,10 +219,48 @@ function applyHit(attacker: Fighter, t: Fighter, dir: THREE.Vector3, dmg: number
     fx.shake(0.4, t.pos);
   }
   fx.impact(t.centre(v1).addScaledVector(dir, -0.35), big);
+  return true;
+}
+
+/** A range, from the edge of a blast (first) to its centre (second). */
+type Span = readonly [number, number];
+
+/**
+ * Everyone but `by` (and its allies) within `radius` of `c` takes damage and flies outward, the
+ * more the closer they stood. Returns how many it caught.
+ */
+export function blast(by: Fighter, all: Fighter[], c: THREE.Vector3, radius: number, dmg: Span, out: Span, up: Span, fx: Fx, verb: string | null = null): number {
+  let n = 0;
+  for (const t of all) {
+    if (t === by || !t.alive || !t.root.visible || t.heldBy || t.friends.has(by)) continue;
+    const d = t.pos.distanceTo(c);
+    if (d > radius) continue;
+    const k = 1 - d / radius, lerp = (s: Span) => s[0] + (s[1] - s[0]) * k;
+    const dir = v3.set(t.pos.x - c.x, 0, t.pos.z - c.z);
+    if (dir.lengthSq() < 0.01) dir.set(Math.random() - 0.5, 0, Math.random() - 0.5);
+    dir.normalize();
+    hurt(t, lerp(dmg), by, fx, 'hit', verb);
+    t.vel.set(dir.x * lerp(out), lerp(up), dir.z * lerp(out));
+    t.launch(dir);
+    t.grounded = false;
+    t.squashVel = 6;
+    t.flash = 0.12;
+    n++;
+  }
+  return n;
+}
+
+/** Runs every power's clock and step, then the kit's own step. */
+export function stepGear(f: Fighter, a: Arena) {
+  for (const p of f.gear.powers) {
+    if (p.wait > 0) p.wait -= STEP;
+    p.step(f, a);
+  }
+  f.gear.step?.(a);
 }
 
 export function startPunch(f: Fighter, now: number): boolean {
-  if (f.punchT >= 0 || f.tumbling || !f.alive) return false;
+  if (f.punchT >= 0 || !f.free) return false;
   f.combo = now - f.lastPunchAt < 0.75 ? (f.combo % 3) + 1 : 1;
   f.lastPunchAt = now;
   f.punchT = 0;
@@ -224,7 +289,7 @@ export function blockBetween(a: THREE.Vector3, b: THREE.Vector3): boolean {
 
 /** Whether `f`'s punch can land on `t` from `d` blocks away: close enough, roughly level, and not behind a wall. */
 export function canPunch(f: Fighter, t: Fighter, d: number, reach: number): boolean {
-  if (t === f || !t.alive || !t.root.visible || d > reach || Math.abs(t.pos.y - f.pos.y) > 1.8) return false;
+  if (t === f || !t.alive || !t.root.visible || t.heldBy || d > reach || Math.abs(t.pos.y - f.pos.y) > 1.8) return false;
   // Clear at chest height or at head height, so a ledge underfoot does not block a punch downward.
   const clear = (k: number) => !blockBetween(v1.copy(f.pos).setY(f.pos.y + f.height * k), v3.copy(t.pos).setY(t.pos.y + t.height * k));
   return clear(0.5) || clear(0.85);
@@ -237,7 +302,7 @@ function punchTarget(f: Fighter, all: Fighter[], fwd: THREE.Vector3): Fighter | 
   let best: Fighter | null = null, bestD = f.isPlayer ? PLAYER_REACH : 1.9;
   for (const t of all) {
     const dx = t.pos.x - f.pos.x, dz = t.pos.z - f.pos.z, d = Math.hypot(dx, dz);
-    if (d > 0.4 && (dx * fwd.x + dz * fwd.z) / d < 0.4) continue;
+    if (f.friends.has(t) || (d > 0.4 && (dx * fwd.x + dz * fwd.z) / d < 0.4)) continue;
     if (!canPunch(f, t, d, bestD)) continue;
     best = t;
     bestD = d;
@@ -256,8 +321,8 @@ function resolvePunch(f: Fighter, all: Fighter[], fx: Fx) {
   if (dir.lengthSq() < 0.01) dir.copy(fwd);
   dir.normalize().lerp(fwd, 0.5).normalize();
   const finisher = f.combo === 3;
-  const dmg = f.isPlayer ? 18 : best.isPlayer ? 9 : 7; // bots go easier on each other, so matches last
-  applyHit(f, best, dir, dmg * (finisher ? 1.4 : 1), f.look.power * (finisher ? 1.5 : 1), fx);
+  const dmg = (f.isPlayer ? 18 : best.isPlayer ? 9 : 7) * f.strength; // bots go easier on each other, so matches last
+  hit(f, best, dir, dmg * (finisher ? 1.4 : 1), f.power * (finisher ? 1.5 : 1), fx);
 }
 
 /** The player's fists also break the block in front of them. */
@@ -275,55 +340,31 @@ function punchBlock(f: Fighter, fwd: THREE.Vector3, fx: Fx) {
   }
 }
 
-/** The ground slam: everyone in range flies outward, loose chunks too, and a floor of blocks caves in. */
-export function slam(f: Fighter, all: Fighter[], fx: Fx) {
-  const c = f.pos;
-  for (const t of all) {
-    if (t === f || !t.alive || !t.root.visible) continue;
-    const d = t.pos.distanceTo(c);
-    if (d > SLAM_RADIUS) continue;
-    const k = 1 - d / SLAM_RADIUS;
-    const dir = v3.set(t.pos.x - c.x, 0, t.pos.z - c.z);
-    if (dir.lengthSq() < 0.01) dir.set(Math.random() - 0.5, 0, Math.random() - 0.5);
-    dir.normalize();
-    hurt(t, 8 + 14 * k, f, fx);
-    t.vel.set(dir.x * (9 + 15 * k), 10 + 10 * k, dir.z * (9 + 15 * k));
-    t.launch(dir);
-    t.grounded = false;
-    t.squashVel = 6;
-    t.flash = 0.12;
-  }
-  const R = 2.4, floorY = Math.floor(c.y - 0.5);
-  for (let x = Math.floor(c.x - R); x <= Math.floor(c.x + R); x++)
-    for (let z = Math.floor(c.z - R); z <= Math.floor(c.z + R); z++)
-      for (let y = Math.max(0, floorY - 1); y <= floorY; y++) {
-        if (Math.hypot(x + 0.5 - c.x, z + 0.5 - c.z) > R) continue;
-        const color = removeBlock(x, y, z);
-        if (color) fx.shatter(x, y, z, color, v1.set(0, 6, 0));
-      }
-  f.squashVel = 6;
-  fx.shockwave(c, SLAM_RADIUS);
-  fx.hitStop(0.07);
-  fx.shake(0.8);
-}
-
-/** Keeps bodies from overlapping. A body tumbling fast bowls over whoever it hits. */
+/**
+ * Keeps bodies from overlapping. A body tumbling fast bowls over whoever it hits, and so does one
+ * ramming on purpose (a rolling ball) above its ram speed. Nobody bowls over an ally, and flyers
+ * pass through bodies instead of shoving them.
+ */
 export function collideFighters(all: Fighter[], fx: Fx) {
   for (let i = 0; i < all.length; i++) {
     for (let j = i + 1; j < all.length; j++) {
       const a = all[i], b = all[j];
-      if (!a.root.visible || !b.root.visible) continue;
+      if (!a.root.visible || !b.root.visible || a.heldBy || b.heldBy) continue;
       const dx = b.pos.x - a.pos.x, dz = b.pos.z - a.pos.z, d = Math.hypot(dx, dz);
       const min = a.halfW + b.halfW + 0.1;
-      if (d >= min || Math.abs(a.pos.y - b.pos.y) > 1.7) continue;
+      if (d >= min || a.pos.y > b.pos.y + b.height - 0.15 || b.pos.y > a.pos.y + a.height - 0.15) continue;
       const sa = Math.hypot(a.vel.x, a.vel.z), sb = Math.hypot(b.vel.x, b.vel.z);
       const [fast, slow] = sa > sb ? [a, b] : [b, a];
-      if (fast.tumbling && Math.max(sa, sb) > 9 && slow.alive && slow.bumpImmune <= 0) {
+      const speed = Math.max(sa, sb), ram = !fast.tumbling && fast.ram && speed > fast.ram.speed ? fast.ram : null;
+      if ((ram || (fast.tumbling && speed > 9)) && slow.alive && slow.bumpImmune <= 0 && !slow.friends.has(fast)) {
         slow.bumpImmune = 0.4;
-        applyHit(fast.lastHitBy ?? fast, slow, v2.set(fast.vel.x, 0, fast.vel.z).normalize(), 7, 0.65, fx);
-        fast.vel.multiplyScalar(0.55);
+        const dir = v2.set(fast.vel.x, 0, fast.vel.z).normalize();
+        if (ram) hit(fast, slow, dir, ram.damage, ram.power, fx, ram.verb);
+        else hit(fast.lastHitBy ?? fast, slow, dir, 7, 0.65, fx);
+        fast.vel.multiplyScalar(ram ? 0.8 : 0.55); // a strike rolls on through the pins
         continue;
       }
+      if (a.flies || b.flies) continue; // flyers swoop straight through: no shoving in mid-air
       const nx = d > 1e-4 ? dx / d : 1, nz = d > 1e-4 ? dz / d : 0, push = (min - d) / 2;
       shove(a, -nx * push, -nz * push);
       shove(b, nx * push, nz * push);
@@ -333,6 +374,12 @@ export function collideFighters(all: Fighter[], fx: Fx) {
 
 /** Pushes a body sideways, but never into a block. */
 export function shove(f: Fighter, dx: number, dz: number) {
+  moveBy(f, dx, 0, dz);
+}
+
+/** Moves a body outside the physics step (carried, steered by a power), but never into a block. */
+export function moveBy(f: Fighter, dx: number, dy: number, dz: number) {
+  if (dy && sweep(f, 1, dy)) stopAt(f, 1, dy);
   if (dx && sweep(f, 0, dx)) stopAt(f, 0, dx);
   if (dz && sweep(f, 2, dz)) stopAt(f, 2, dz);
 }

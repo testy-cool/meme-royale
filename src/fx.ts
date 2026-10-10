@@ -265,17 +265,47 @@ export class Fx {
     }
   }
 
-  /** Coloured cubes the body leaves behind: a speed trail, or Nyan Cat's rainbow. */
-  trail(at: THREE.Vector3, rainbow: boolean) {
+  /** A white cube left behind by a body flying fast. */
+  trail(at: THREE.Vector3) {
+    this.sparks.add(at, v2.set(0, 0, 0), 0.22, WHITE, 0.3, 0, 2);
+  }
+
+  /** One slice of Nyan Cat's rainbow: six stripes stacked along `up`, centred on `at`, hanging in the air for `life`. */
+  rainbow(at: THREE.Vector3, up: THREE.Vector3, life: number) {
     v2.set(0, 0, 0);
-    if (!rainbow) {
-      this.sparks.add(at, v2, 0.22, WHITE, 0.3, 0, 2);
-      return;
-    }
     RAINBOW.forEach((c, i) => {
-      v1.set(at.x, at.y + 0.38 - i * 0.13, at.z);
-      this.sparks.add(v1, v2, 0.15, c, 0.55, 0, 0);
+      v1.copy(at).addScaledVector(up, 0.4 - i * 0.16);
+      this.sparks.add(v1, v2, 0.19, c, life, 0, 0);
     });
+  }
+
+  /** A puff of something light (steam, glitter) rising from `at`. */
+  puff(at: THREE.Vector3, color: THREE.Color, count: number, size = 0.18) {
+    for (let i = 0; i < count; i++) {
+      v1.set(at.x + (Math.random() - 0.5) * 0.4, at.y, at.z + (Math.random() - 0.5) * 0.4);
+      v2.set((Math.random() - 0.5) * 1.5, 1.5 + Math.random() * 2, (Math.random() - 0.5) * 1.5);
+      this.sparks.add(v1, v2, size * (0.7 + Math.random() * 0.6), color, 0.5 + Math.random() * 0.4, -0.05, 2, 1.5);
+    }
+  }
+
+  /** Clods of earth and dust thrown up around `at`, out to `radius`: a crater or a hard landing. */
+  crater(at: THREE.Vector3, radius: number, count: number) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2, r = radius * Math.random();
+      v1.set(at.x + Math.cos(a) * r, at.y + 0.2, at.z + Math.sin(a) * r);
+      v2.set(Math.cos(a) * (3 + Math.random() * 6), 7 + Math.random() * 9, Math.sin(a) * (3 + Math.random() * 6));
+      this.debris.add(v1, v2, 0.25 + Math.random() * 0.3, EARTH[i % EARTH.length], 2.5 + Math.random() * 2);
+      if (i % 2) {
+        tint.copy(HAZE).multiplyScalar(0.8 + Math.random() * 0.2);
+        v2.set(Math.cos(a) * (2 + Math.random() * 4), 2 + Math.random() * 4, Math.sin(a) * (2 + Math.random() * 4));
+        this.clouds.add(v1, v2, 0.45 + Math.random() * 0.5, tint, 1 + Math.random(), -0.02, 1.2, 1.4);
+      }
+    }
+  }
+
+  /** A ring racing out across the ground from `at`, in `color`. */
+  wave(at: THREE.Vector3, radius: number, color: number, duration = 0.42) {
+    this.ring(at, radius, duration, color);
   }
 
   /** A burst of a fighter's colours when they are knocked out. */
