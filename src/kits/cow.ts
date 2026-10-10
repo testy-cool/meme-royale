@@ -137,6 +137,15 @@ class Ghosts {
     }
   }
 
+  /** Hides every copy at once. */
+  clear() {
+    for (const c of this.copies) {
+      c.age = 9;
+      c.mat.opacity = 0;
+      c.root.visible = false;
+    }
+  }
+
   /** `dt` in real seconds; leaves a new copy every so often while `on`. */
   update(dt: number, on: boolean) {
     this.clock += dt;
@@ -246,6 +255,6 @@ export default {
         ghosts.update(dt / who.timeScale, who.timeScale < 1);
       },
     };
-    return { model, powers: [new FenceJump()] };
+    return { model, powers: [new FenceJump()], clear: () => ghosts.clear() };
   },
 } satisfies Kit;

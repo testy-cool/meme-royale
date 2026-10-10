@@ -56,8 +56,9 @@ class Chart {
 
   constructor(private readonly scene: THREE.Scene, from: THREE.Vector3, to: THREE.Vector3, color: number, jag: number) {
     this.mat = new THREE.MeshBasicMaterial({ color, transparent: true });
-    const n = 7;
-    const pts = Array.from({ length: n + 1 }, (_, i) => from.clone().lerp(to, i / n).add(v1.set(0, i % 2 && i < n ? jag : 0, 0)));
+    // Copied first: callers pass the module's scratch vectors, which building the points must not move.
+    const n = 7, start = from.clone(), end = to.clone(), jog = new THREE.Vector3();
+    const pts = Array.from({ length: n + 1 }, (_, i) => start.clone().lerp(end, i / n).add(jog.set(0, i % 2 && i < n ? jag : 0, 0)));
     for (let i = 0; i < n; i++) {
       const a = pts[i], b = pts[i + 1], len = a.distanceTo(b);
       const bar = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.24, len + 0.2), this.mat);
@@ -253,6 +254,16 @@ class Stonks extends Power {
     for (const c of this.charts) c.fading = Math.max(c.fading, 0);
   }
 
+  /** Takes down the charts and the scorch mark at once: nothing would fade them once he is gone. */
+  clear() {
+    for (const c of this.charts) c.dispose();
+    this.charts = [];
+    this.rise = this.fall = null;
+    this.scar.visible = false;
+    this.scarAge = 99;
+    this.stage = 'idle';
+  }
+
   wants(f: Fighter, _a: Arena, target: Fighter | null) {
     if (!target || !f.grounded) return false;
     const d = Math.hypot(target.pos.x - f.pos.x, target.pos.z - f.pos.z);
@@ -272,9 +283,11 @@ export default {
   allies: ['Orang'],
   colors: ['#d4dee5', '#2c3e66', '#22c55e', '#ef4444'],
   create(f: Fighter) {
+    const stonks = new Stonks(f.scene);
     return {
       model: new Humanoid({ skin: '#d4dee5', hair: '#d4dee5', shirt: '#2c3e66', pants: '#22252b', face: () => {}, scale: 1, head }),
-      powers: [new Stonks(f.scene)],
+      powers: [stonks],
+      clear: () => stonks.clear(),
     };
   },
 } satisfies Kit;

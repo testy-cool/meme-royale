@@ -64,6 +64,9 @@ export function m3(canvas: HTMLCanvasElement) {
   seeded(36, () => wojak());
   seeded(37, () => cow());
   seeded(38, () => matches());
+  // The PR #8 review's reproductions.
+  seeded(41, () => charts());
+  seeded(42, () => restart(canvas));
 }
 
 /** The kit system: every module is a working character, and no shared code names any of them. */
@@ -450,5 +453,88 @@ function matches() {
   const unused = wanted.filter((w) => !uses.get(w));
   check('Bots use every power in real matches', unused.length === 0 && !broken && match.time > BOSS_AT,
     `6 bot-only matches: ${[...uses].map(([k, n]) => `${k} ${n}`).join(', ')}${unused.length ? `; never used: ${unused.join(', ')}` : ''}${broken ? `; broken: ${broken}` : ''}`);
+  for (const f of match.fighters) f.hide();
+}
+
+/**
+ * PR #8 review: the chart Meme Man rides runs from where he takes off to the top, and the red one
+ * from the top down to where he lands. Building its points used to move an endpoint passed in as a
+ * shared scratch vector, so a launch from (10, 0, -6) to (16, 0, -6) drew the red line to (0, 0, 0).
+ */
+function charts() {
+  resetWorld();
+  const mm = body('Meme Man', 10, 0.0001, -6), a = arena([mm]);
+  const stonks = power(mm) as Power & { crashes: number; charts: { bars: THREE.Mesh[]; ends: THREE.Vector3[] }[]; apex: THREE.Vector3 };
+  mm.goal.set(16, 0, -6);
+  stonks.use(mm, a);
+  sim(a, 3, [], () => stonks.crashes > 0);
+  const [rise, fall] = stonks.charts;
+  const ends = (c: typeof rise) => [c.bars[0].position.clone().multiplyScalar(2).sub(c.ends[0]), c.ends[c.ends.length - 1]];
+  const [riseFrom, riseTo] = ends(rise), [fallFrom, fallTo] = ends(fall), apex = stonks.apex;
+  const takeoff = new THREE.Vector3(10, 0.4001, -6), impact = new THREE.Vector3(16, 0.4, -6);
+  const off = [riseFrom.distanceTo(takeoff), riseTo.distanceTo(apex), fallFrom.distanceTo(apex), fallTo.distanceTo(impact)];
+  // Every corner of the zigzag sits over the straight line between its ends, evenly spaced; only its height jogs.
+  const stray = (c: typeof rise, from: THREE.Vector3, to: THREE.Vector3) =>
+    Math.max(...c.ends.map((p, i) => {
+      const want = from.clone().lerp(to, (i + 1) / c.ends.length);
+      return Math.hypot(p.x - want.x, p.z - want.z);
+    }));
+  const worst = Math.max(stray(rise, takeoff, apex), stray(fall, apex, impact));
+  const v = (p: THREE.Vector3) => `(${p.toArray().map((n) => r(n, 2)).join(', ')})`;
+  check('Meme Man\'s charts run from his take-off to the top, and down to where he lands', stonks.charts.length === 2 && Math.max(...off) < 0.05 && worst < 0.05 && Math.hypot(mm.pos.x - 16, mm.pos.z + 6) < 1,
+    `green ${v(riseFrom)} to ${v(riseTo)}, red ${v(fallFrom)} to ${v(fallTo)}, every corner within ${r(worst, 3)} of its place along the way; the top at ${v(apex)}; he came down at ${v(mm.pos)}`);
+  done(mm);
+}
+
+/**
+ * PR #8 review: Play Again leaves nothing behind. With the cow's slow-motion ghosts, Meme Man's
+ * charts and the player's carried block all out, a restart without those characters shows exactly
+ * what a clean start shows, with nothing in flight; three seconds on, still nothing of theirs.
+ */
+function restart(canvas: HTMLCanvasElement) {
+  resetWorld();
+  const you = new Player(body('Gigachad', 0, 0.0001, 8), canvas);
+  const match = new Match(scene, fx, you), a = match.arena;
+  const after = ['Doge', 'Pepe', 'Trollface', 'Nyan Cat', 'Wojak'].map(kit);
+  const shown = () => new Set(scene.children.filter((c) => c.visible));
+  const frame = (dt: number) => {
+    match.step(dt, false);
+    for (const f of match.fighters) f.render(dt, false);
+  };
+  seeded(5, () => match.start(after));
+  for (const f of match.fighters) f.render(0, false);
+  const clean = shown();
+
+  match.start(['Udder Cow', 'Meme Man', 'Orang', 'Nyan Cat', 'Wojak'].map(kit));
+  for (let i = 0; i < 120; i++) frame(1 / 60); // everyone lands
+  // Every bot's power at once, aimed 8 blocks ahead of it, and the player tears out a block to carry.
+  for (const f of match.bots.map((b) => b.f)) {
+    f.goal.copy(f.pos).addScaledVector(f.forward(new THREE.Vector3()), 8);
+    f.aimDir.subVectors(f.goal, f.pos).normalize();
+    for (const p of f.gear.powers) p.use(f, a);
+  }
+  const carried = power(you.f, 1).use(you.f, a) && you.f.lifting;
+  for (let i = 0; i < 36; i++) frame(1 / 60);
+  const out = [...shown()].filter((c) => !clean.has(c)).length;
+  const cow = match.fighters.find((f) => f.kit.name === 'Udder Cow')!, mm = match.fighters.find((f) => f.kit.name === 'Meme Man')!;
+  const busy = `cow jumping ${cow.busy}, Meme Man riding the chart ${mm.busy}, player carrying ${carried}`;
+
+  seeded(5, () => match.start(after));
+  for (const f of match.fighters) f.render(0, false);
+  const left = [...shown()].filter((c) => !clean.has(c));
+  const flying = match.shots.flying;
+  // Three seconds on, ignoring what the new match's own fighters put up: rings, flashes, health bars, shots.
+  for (let i = 0; i < 180; i++) frame(1 / 60);
+  const own = new Set<THREE.Object3D>([
+    ...(fx as unknown as { rings: { mesh: THREE.Object3D }[] }).rings.map((x) => x.mesh),
+    ...(fx as unknown as { flashes: { sprite: THREE.Object3D }[] }).flashes.map((x) => x.sprite),
+    ...[...match.cast.map((b) => b.f), you.f].flatMap((f) => (f as unknown as { hpBar?: { sprite: THREE.Object3D } }).hpBar?.sprite ?? []),
+  ]);
+  const shots = match.shots as unknown as { live: { mesh: THREE.Object3D }[]; spare: Record<string, THREE.Object3D[]> };
+  for (const x of [...shots.live.map((l) => l.mesh), ...Object.values(shots.spare).flat()]) own.add(x);
+  const later = [...shown()].filter((c) => !clean.has(c) && !own.has(c));
+  const names = (cs: THREE.Object3D[]) => cs.map((c) => c.type + (c.children.length ? `(${c.children.length})` : '')).join(', ') || 'none';
+  check('Play Again leaves nothing behind: no ghosts, charts or carried block from the last match', out > 0 && cow.busy && mm.busy && carried && left.length === 0 && flying === 0 && later.length === 0,
+    `${out} objects of theirs up mid-power (${busy}); after the restart, left over: ${names(left)}, ${flying} shots in flight; 3 s later: ${names(later)}`);
   for (const f of match.fighters) f.hide();
 }

@@ -41,6 +41,11 @@ export interface Gear {
   step?(a: Arena): void;
   /** A fresh life. */
   reset?(): void;
+  /**
+   * Puts away everything the fighter has out in the world or in hand (effects, a carried block),
+   * without letting any of it act: it is leaving the island, or starting a fresh life.
+   */
+  clear?(): void;
 }
 
 /** The body's look and animation. Feet at y = 0, facing +z, in blocks. */

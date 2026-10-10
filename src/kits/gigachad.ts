@@ -284,6 +284,15 @@ class Grab extends Power {
     if (this.active) this.letGo(f);
   }
 
+  /** Puts down whatever it holds without throwing or dropping it: the match is over for it. */
+  discard(f: Fighter) {
+    if (this.held?.heldBy === f) this.held.heldBy = null;
+    this.held = null;
+    this.carrying = false;
+    this.chunk.visible = false;
+    f.lifting = false;
+  }
+
   wants(f: Fighter, _a: Arena, target: Fighter | null) {
     if (this.active) return this.heldFor > 0.6;
     return !!target && Math.hypot(target.pos.x - f.pos.x, target.pos.z - f.pos.z) < GRAB_REACH - 0.4;
@@ -308,12 +317,14 @@ export default {
     bow.scale.setScalar(1.35);
     bow.visible = false;
     model.hand.add(bow);
+    const grab = new Grab(f.scene);
     return {
       model,
-      powers: [new Slam(), new Grab(f.scene)],
+      powers: [new Slam(), grab],
       step() {
         bow.visible = f.bowOut;
       },
+      clear: () => grab.discard(f),
     };
   },
 } satisfies Kit;

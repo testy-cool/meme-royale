@@ -173,6 +173,7 @@ export class Fighter {
   }
 
   respawn(at: THREE.Vector3) {
+    this.gear.clear?.(); // first, so nothing from the last life acts on this one
     this.pos.copy(at);
     this.vel.set(0, 0, 0);
     this.hp = 100;
@@ -201,7 +202,9 @@ export class Fighter {
     this.root.visible = true;
   }
 
+  /** Takes the body off the island: knocked out and gone, or left out of this match. */
   hide() {
+    this.gear.clear?.();
     this.root.visible = false;
     if (this.hpBar) this.hpBar.sprite.visible = false;
   }

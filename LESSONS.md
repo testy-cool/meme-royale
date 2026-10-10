@@ -250,3 +250,19 @@ The worker appends short, durable lessons here: gotchas, decisions, and deploy s
   bot-only matches before 2:00. Tallying knockouts by killer and verb over 16 to 24 seeded matches
   pointed straight at them. Softer rolling hits (5 damage, needing speed 6), a rarer, weaker strike
   and crater, and allies ganging up less brought the median back to about 3:20.
+
+## M3 part 1 review fixes (2026-10-10)
+- Anything a kit puts in the world outside its fighter (the cow's ghosts, Meme Man's charts and
+  scorch mark, a carried block) needs a way to go when the fighter does. A benched or knocked-out
+  fighter is not stepped or rendered, so effects that age in its step or animation froze in place
+  and lasted into the next match. `Gear.clear()` now runs on `hide()` and `respawn()`, and each kit
+  puts its things away there without letting them act.
+- Clear projectiles after everyone is respawned, not before. Respawning the player interrupted the
+  grab, which dropped its block as a new projectile into the fresh match.
+- A function handed a module's scratch vector must copy it before using that scratch vector itself.
+  The chart built its points with `v1` while its caller passed `v1` as an endpoint, so the red chart
+  ended at (0, 0, 0). Copy the endpoints first, and give helpers their own temporaries.
+- To probe "a restart leaves nothing behind" without knowing what each kit owns, snapshot the set
+  of visible top-level scene objects right after a clean start, run every power, restart with the
+  same seed, and diff the two sets. Re-running the probe on the unfixed code (`git stash push -- src`)
+  showed the check catching all three bugs.

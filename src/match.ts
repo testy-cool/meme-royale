@@ -84,7 +84,7 @@ export class Match {
     player?.f.hide();
   }
 
-  /** Puts these characters in as this match's bots, and benches the rest. Allies team up. */
+  /** Puts these characters in as this match's bots, and benches the rest (putting away what they had out). Allies team up. */
   seat(kits: readonly Kit[]) {
     this.bots.length = this.fighters.length = 0;
     for (const b of this.cast) {
@@ -115,7 +115,6 @@ export class Match {
     this.boss.reset();
     this.storm.reset();
     this.storm.show(true);
-    this.shots.reset();
     this.chests.reset();
     this.live = true;
     this.time = this.kills = this.acc = 0;
@@ -126,6 +125,7 @@ export class Match {
     for (const b of this.bots) b.reset();
     const taken = this.spread();
     if (this.player) this.player.dropIn(this.spot(taken));
+    this.shots.reset(); // last, so nothing the old match had in hand is thrown into this one
   }
 
   /** Puts the bots back at full health, spread over the island. Returns where they stand. */
