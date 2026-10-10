@@ -1,11 +1,14 @@
 import * as THREE from 'three';
-import { BOTS } from './cast';
 import { Bot, type Hazards } from './bots';
 import { Boss } from './boss';
-import { STEP, collideFighters, hurt, knockOut, knockouts, stepBody, updatePunch } from './combat';
+import { STEP, collideFighters, hurt, knockOut, knockouts, stepBody, stepGear, updatePunch } from './combat';
 import { Fighter } from './fighter';
 import type { Fx } from './fx';
+import type { Arena, Kit } from './kit';
+import { Chests } from './loot';
 import type { Player } from './player';
+import { BOT_KITS, allied, draw } from './roster';
+import { Shots } from './shots';
 import { Storm } from './storm';
 import { openSpot, resetWorld } from './world';
 
@@ -23,7 +26,7 @@ export interface FeedLine {
   you: boolean; // the player did it or had it done to them
 }
 
-const who = (f: Fighter | 'boss', start: boolean) => (f === 'boss' ? BOSS_NAME : f.isPlayer ? (start ? 'You' : 'you') : f.look.name);
+const who = (f: Fighter | 'boss', start: boolean) => (f === 'boss' ? BOSS_NAME : f.isPlayer ? (start ? 'You' : 'you') : f.name);
 
 /** The kill feed's line for a knockout. */
 export function describe(f: Fighter): string {
@@ -35,22 +38,27 @@ export function describe(f: Fighter): string {
       return by ? `${who(by, true)} knocked ${v} off the island` : `${who(f, true)} fell off the island`;
     default:
       if (by === 'boss') return `${BOSS_NAME} flattened ${v}`;
-      return by ? `${who(by, true)} eliminated ${v}` : `${who(f, true)} hit a wall too hard`;
+      return by ? `${who(by, true)} ${f.koVerb ?? 'eliminated'} ${v}` : `${who(f, true)} hit a wall too hard`;
   }
 }
 
-const colorsOf = (f: Fighter) => [f.look.skin, f.look.shirt, f.look.pants].map((c) => new THREE.Color(c));
-const tmp = new THREE.Vector3(), ahead = new THREE.Vector3();
+const colorsOf = (f: Fighter) => f.kit.colors.map((c) => new THREE.Color(c));
+const tmp = new THREE.Vector3();
 
 /**
- * One battle royale: the five bots and the player, the storm and the boss. Between matches (the
- * title screen) the bots spar on their own and come back after a knockout.
+ * One battle royale: five bots drawn from the roster and the player, the storm and the boss. Between
+ * matches (the title screen) the bots spar on their own and come back after a knockout.
  */
 export class Match {
-  readonly bots: Bot[];
-  readonly fighters: Fighter[];
+  readonly cast: Bot[]; // one bot per character; each match puts some of them in
+  readonly bots: Bot[] = []; // this match's
+  readonly fighters: Fighter[] = []; // this match's bots, then the player
   readonly boss: Boss;
   readonly storm: Storm;
+  readonly shots: Shots;
+  readonly chests: Chests;
+  readonly arena: Arena;
+  allies = false; // an alliance is still on: it ends once only allies are left
   live = false; // a match is on: knockouts are final, the storm and the boss run
   time = 0; // seconds into the match
   kills = 0; // the player's eliminations
@@ -63,13 +71,31 @@ export class Match {
   private readonly hazards: Hazards;
 
   constructor(scene: THREE.Scene, private readonly fx: Fx, readonly player: Player | null) {
-    this.bots = BOTS.map((look) => new Bot(new Fighter(look, false, scene)));
-    this.fighters = this.bots.map((b) => b.f);
+    this.cast = BOT_KITS.map((k) => new Bot(new Fighter(k, false, scene)));
     this.boss = new Boss(scene);
     this.storm = new Storm(scene);
+    this.shots = new Shots(scene);
+    this.chests = new Chests(scene);
+    this.chests.reset();
     this.hazards = { boss: this.boss, storm: this.storm };
+    this.arena = { fighters: this.fighters, fx, shots: this.shots };
+    this.seat(draw());
     this.spread();
     player?.f.hide();
+  }
+
+  /** Puts these characters in as this match's bots, and benches the rest. Allies team up. */
+  seat(kits: readonly Kit[]) {
+    this.bots.length = this.fighters.length = 0;
+    for (const b of this.cast) {
+      b.f.friends.clear();
+      if (kits.includes(b.f.kit)) this.bots.push(b);
+      else b.f.hide();
+    }
+    this.fighters.push(...this.bots.map((b) => b.f));
+    if (this.player) this.fighters.push(this.player.f);
+    for (const a of this.fighters) for (const b of this.fighters) if (a !== b && allied(a.kit, b.kit)) a.friends.add(b);
+    this.allies = this.fighters.some((f) => f.friends.size > 0);
   }
 
   /** Contestants still standing. */
@@ -79,25 +105,27 @@ export class Match {
     return n;
   }
 
-  /** A fresh match, with no reload: the village rebuilt, everyone at full health, the player dropping in. */
-  start() {
+  /**
+   * A fresh match, with no reload: a new draw of bots, the village rebuilt, the chests shut,
+   * everyone at full health, the player dropping in. `kits` fixes the bots (the probe uses it).
+   */
+  start(kits: readonly Kit[] = draw()) {
     resetWorld();
     this.fx.reset();
     this.boss.reset();
     this.storm.reset();
     this.storm.show(true);
+    this.shots.reset();
+    this.chests.reset();
     this.live = true;
     this.time = this.kills = this.acc = 0;
     this.result = null;
     this.feed.length = 0;
     knockouts.length = 0;
+    this.seat(kits);
     for (const b of this.bots) b.reset();
     const taken = this.spread();
-    if (this.player) {
-      const f = this.player.f;
-      if (!this.fighters.includes(f)) this.fighters.push(f);
-      this.player.dropIn(this.spot(taken));
-    }
+    if (this.player) this.player.dropIn(this.spot(taken));
   }
 
   /** Puts the bots back at full health, spread over the island. Returns where they stand. */
@@ -121,13 +149,13 @@ export class Match {
 
   /** Advances everything by `dt`. The player's controls only run when `control` is set. */
   step(dt: number, control: boolean) {
-    const { fx, fighters, player } = this;
+    const { fx, fighters, player, arena } = this;
     const hz = this.live ? this.hazards : null;
     this.clock += dt;
     if (this.live) this.time += dt;
-    if (player && control) player.update(dt, this.clock, fighters);
+    if (player && control) player.update(dt, this.clock, arena);
     else if (player) player.f.want.set(0, 0);
-    for (const b of this.bots) b.update(dt, fighters, this.clock, hz);
+    for (const b of this.bots) b.update(dt, arena, this.clock, hz);
     for (const f of fighters) updatePunch(f, fighters, fx, dt);
     this.acc += dt;
     while (this.acc >= STEP) {
@@ -135,10 +163,18 @@ export class Match {
       for (const f of fighters) if (f.root.visible) stepBody(f, fx);
       collideFighters(fighters, fx);
       this.boss.pushOut(fighters);
-      if (player && control) player.afterStep(fighters, fx);
+      for (const f of fighters) if (f.root.visible) stepGear(f, arena);
+      this.shots.step(fighters, fx);
     }
     for (const f of fighters) this.lifecycle(f, dt);
     if (this.live) this.runHazards(dt);
+    if (this.live && player) {
+      const found = this.chests.update(dt, player.f, player.hasBow, fx);
+      if (found) {
+        player.take(found);
+        this.feed.push({ text: found === 'bow' ? 'You found a bow' : 'You found more arrows', you: true });
+      }
+    }
     this.trails(dt);
     fx.update(dt);
     this.tally();
@@ -204,17 +240,24 @@ export class Match {
       if (this.result) this.resultTime = this.time;
       if (this.result?.won) this.player!.f.invulnerable = true;
     }
+    this.breakAlliances();
   }
 
+  /** Once only allies are left standing, the alliance is over and they turn on each other. */
+  private breakAlliances() {
+    if (!this.allies || !this.live) return;
+    const standing = this.fighters.filter((f) => f.alive);
+    if (standing.length < 2 || !standing.every((f) => standing.every((o) => o === f || f.friends.has(o)))) return;
+    for (const f of this.fighters) f.friends.clear();
+    this.allies = false;
+    this.feed.push({ text: `${standing.map((f) => f.name).join(' and ')}: the alliance is over`, you: false });
+  }
+
+  /** White streaks behind bodies flying fast. */
   private trails(dt: number) {
     this.trailClock += dt;
     if (this.trailClock <= 0.035) return;
     this.trailClock = 0;
-    for (const f of this.fighters) {
-      if (!f.root.visible) continue;
-      const speed = f.vel.length();
-      if (f.look.rainbow && speed > 2) this.fx.trail(f.centre(tmp).addScaledVector(f.forward(ahead), -0.3), true);
-      else if (f.tumbling && speed > 10) this.fx.trail(f.centre(tmp), false);
-    }
+    for (const f of this.fighters) if (f.root.visible && f.tumbling && f.vel.length() > 10) this.fx.trail(f.centre(tmp));
   }
 }

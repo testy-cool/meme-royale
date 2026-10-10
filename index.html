@@ -13,14 +13,20 @@
         <div class="left">6 left</div>
         <div class="feed" aria-live="polite"></div>
       </div>
-      <div class="hp" aria-label="Health"><div class="hp-fill"></div><span class="hp-text">100</span></div>
-      <div class="slam ready" aria-label="Ground slam"><div class="slam-fill"></div><span>Q</span></div>
+      <div class="crosshair" hidden><i></i><i></i><i></i><i></i></div>
+      <div class="bar">
+        <div class="hp" aria-label="Health"><div class="hp-fill"></div><span class="hp-text">100</span></div>
+        <div class="key ready" aria-label="Ground slam"><div class="key-fill"></div><span>Q</span></div>
+        <div class="key ready" aria-label="Grab and throw"><div class="key-fill"></div><span>E</span></div>
+        <div class="slot on" aria-label="Fists, key 1">Fist</div>
+        <div class="slot" aria-label="Bow, key 2" hidden>Bow <span class="arrows">10</span></div>
+      </div>
     </div>
     <div id="start" class="overlay">
       <h1 id="title">Meme Royale</h1>
       <p id="detail" hidden></p>
       <button id="play" type="button">Play</button>
-      <p class="controls">WASD move · Mouse look · Space jump · Shift sprint · Click punch · Q slam</p>
+      <p class="controls">WASD move · Mouse look · Space jump · Shift sprint · Click punch<br />Q slam · E grab and throw · 1 2 fist or bow (find one in a chest)</p>
       <label class="motion"><input id="reduce-motion" type="checkbox" /> Reduce motion</label>
     </div>
     <script type="module" src="/src/main.ts"></script>

@@ -111,10 +111,18 @@ h1 {
   cursor: pointer;
 }
 
-.hp {
+/* bottom left: health, the two power keys, then the weapons */
+.bar {
   position: fixed;
   left: 24px;
   bottom: 24px;
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+}
+
+.hp {
+  position: relative;
   width: 280px;
   height: 32px;
   border-radius: 4px;
@@ -140,11 +148,9 @@ h1 {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
 }
 
-.slam {
-  position: fixed;
-  left: 320px;
-  bottom: 24px;
-  width: 64px;
+.key,
+.slot {
+  position: relative;
   height: 64px;
   border-radius: 4px;
   border: 3px solid rgba(255, 255, 255, 0.35);
@@ -153,17 +159,32 @@ h1 {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  font-size: 26px;
   font-weight: 900;
   color: rgba(255, 255, 255, 0.6);
 }
 
-.slam.ready {
+.key {
+  width: 64px;
+  font-size: 26px;
+}
+
+.slot {
+  padding: 0 18px;
+  gap: 8px;
+  font-size: 22px;
+}
+
+.slot[hidden] {
+  display: none;
+}
+
+.key.ready,
+.slot.on {
   border-color: #ffd54a;
   color: #ffd54a;
 }
 
-.slam-fill {
+.key-fill {
   position: absolute;
   left: 0;
   right: 0;
@@ -171,8 +192,57 @@ h1 {
   background: rgba(0, 0, 0, 0.55);
 }
 
-.slam span {
+.key span {
   position: relative;
+}
+
+/* the bow's crosshair: four ticks that close in as the string draws back */
+.crosshair {
+  --gap: 14px;
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.crosshair[hidden] {
+  display: none;
+}
+
+.crosshair i {
+  position: absolute;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.65);
+}
+
+.crosshair i:nth-child(odd) {
+  width: 12px;
+  height: 2px;
+  top: -1px;
+}
+
+.crosshair i:nth-child(even) {
+  width: 2px;
+  height: 12px;
+  left: -1px;
+}
+
+.crosshair i:nth-child(1) {
+  left: calc(-1 * var(--gap) - 12px);
+}
+
+.crosshair i:nth-child(3) {
+  left: var(--gap);
+}
+
+.crosshair i:nth-child(2) {
+  top: calc(-1 * var(--gap) - 12px);
+}
+
+.crosshair i:nth-child(4) {
+  top: var(--gap);
 }
 
 .corner {

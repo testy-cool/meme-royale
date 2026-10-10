@@ -1,53 +1,22 @@
 // Regression probes, run headless with `npm run probe`. The M1 scenes replay the PR #3 review's
 // reproductions; the M2 scenes check the boss, the storm and the match loop, and time whole matches;
-// the last ones replay the PR #7 review's reproductions.
-// Each scene uses the game's own functions and prints PASS or FAIL.
+// then the PR #7 review's reproductions; then M3's character kits, the bow and the roster.
+// Each scene uses the game's own functions and prints PASS or FAIL. Scenes that depend on chance
+// run under fixed seeds, so a run is repeatable.
 import * as THREE from 'three';
 import { BOSS_HEIGHT, CRUSH } from '../src/boss';
-import { BOTS, PLAYER } from '../src/cast';
-import { STEP, collideFighters, hurt, startPunch, stepBody, updatePunch } from '../src/combat';
+import { STEP, collideFighters, hurt, startPunch, stepBody, stepGear, updatePunch } from '../src/combat';
 import { Fighter } from '../src/fighter';
-import { Fx } from '../src/fx';
+import type { Fx } from '../src/fx';
 import { BOSS_AT, Match, describe } from '../src/match';
 import { Player } from '../src/player';
+import { PLAYER_KIT, kit } from '../src/roster';
 import { STAGES } from '../src/storm';
-import { HEIGHT, ISLAND, buildWorld, clearDistance, isSolid, resetWorld } from '../src/world';
+import { HEIGHT, ISLAND, clearDistance, isSolid, resetWorld } from '../src/world';
+import { arena, blocksIn, body, check, fx, passed, r, scene, seeded, solidCells } from './probe-lib';
+import { m3 } from './probe-m3';
 
-const scene = new THREE.Scene();
-buildWorld(scene, 1);
-const fx = new Fx(scene);
 const village = solidCells();
-let allPassed = true;
-
-function check(name: string, ok: boolean, detail: string) {
-  allPassed &&= ok;
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}: ${detail}`);
-}
-
-const r = (n: number, d = 4) => +n.toFixed(d);
-
-/** Every solid cell above the ground, as one string: two equal strings mean the same village. */
-function solidCells(): string {
-  const out: number[] = [];
-  for (let x = -40; x < 40; x++) for (let y = 0; y < HEIGHT; y++) for (let z = -40; z < 40; z++) if (isSolid(x, y, z)) out.push(x, y, z);
-  return out.join(',');
-}
-
-/** Solid blocks in a box of cells, inclusive. */
-function blocksIn(x0: number, x1: number, z0: number, z1: number): number {
-  let n = 0;
-  for (let x = x0; x <= x1; x++) for (let y = 0; y < HEIGHT; y++) for (let z = z0; z <= z1; z++) if (isSolid(x, y, z)) n++;
-  return n;
-}
-
-function body(name: string, x: number, y: number, z: number, yaw = 0): Fighter {
-  const look = name === PLAYER.name ? PLAYER : BOTS.find((b) => b.name === name)!;
-  const f = new Fighter(look, look === PLAYER, scene);
-  f.respawn(new THREE.Vector3(x, y, z));
-  f.yaw = yaw;
-  f.grounded = true;
-  return f;
-}
 
 /** How deep a body sits inside the blocks around it: 0 when it touches none. */
 function depth(f: Fighter): number {
@@ -71,7 +40,7 @@ function crowd(fighters: Fighter[], goal: THREE.Vector2, seconds: number) {
   for (let t = 0; t < seconds; t += STEP) {
     for (const f of fighters) {
       const dx = goal.x - f.pos.x, dz = goal.y - f.pos.z, d = Math.hypot(dx, dz) || 1;
-      f.want.set((dx / d) * f.look.speed, (dz / d) * f.look.speed);
+      f.want.set((dx / d) * f.speed, (dz / d) * f.speed);
       stepBody(f, fx);
     }
     collideFighters(fighters, fx);
@@ -98,7 +67,12 @@ function punch(attacker: Fighter, target: Fighter) {
   updatePunch(attacker, [attacker, target], fx, 0.1);
 }
 
+/** Every scene, under one fixed seed (and some under their own), so two runs print the same. */
 export function run(canvas: HTMLCanvasElement): boolean {
+  return seeded(20261010, () => scenes(canvas));
+}
+
+function scenes(canvas: HTMLCanvasElement): boolean {
   // P1. Two Doge-sized bodies beside the west house's x = -20 wall (GPT review, finding 1).
   {
     const a = body('Doge', -20.3201, 0.0001, -13.5), b = body('Doge', -21, 0.0001, -13.5);
@@ -131,7 +105,7 @@ export function run(canvas: HTMLCanvasElement): boolean {
     check('P1 crowd into an outside corner', o.maxY < 0.01 && o.maxDepth < 1e-3, `highest y ${r(o.maxY)}, deepest overlap ${r(o.maxDepth)}`);
   }
   // P2. A punch across the same wall: attacker west of it facing +x, target inside the house (GPT review, finding 2).
-  for (const who of ['Doge', PLAYER.name]) {
+  for (const who of ['Doge', PLAYER_KIT.name]) {
     const a = body(who, -20.45, 0.0001, -13.5, Math.PI / 2), t = body('Doge', -18.9, 0.0001, -13.5);
     const wy = Math.floor(a.pos.y + a.height * 0.6);
     punch(a, t);
@@ -170,15 +144,16 @@ export function run(canvas: HTMLCanvasElement): boolean {
   }
   // Aim assist: Nyan Cat 3.1 blocks away, 15 degrees off the camera's aim, running sideways at full speed.
   {
-    const player = new Player(body(PLAYER.name, 3.5, 0.0001, -5, 0), canvas);
+    const player = new Player(body(PLAYER_KIT.name, 3.5, 0.0001, -5, 0), canvas);
     player.yaw = 0;
     const off = THREE.MathUtils.degToRad(15);
     const nyan = body('Nyan Cat', 3.5 + Math.sin(off) * 3.1, 0.0001, -5 + Math.cos(off) * 3.1, -Math.PI / 2);
-    const both = [player.f, nyan];
+    const both = [player.f, nyan], a = arena(both);
+    nyan.flightLock = 99; // running along the ground, as in M1's version of this scene
     (player as unknown as { wantPunch: boolean }).wantPunch = true;
     for (let t = 0; t < 0.3; t += STEP) {
-      player.update(STEP, 50 + t, both);
-      nyan.want.set(nyan.look.speed, 0);
+      player.update(STEP, 50 + t, a);
+      nyan.want.set(nyan.speed, 0);
       for (const f of both) updatePunch(f, both, fx, STEP);
       for (const f of both) stepBody(f, fx);
       collideFighters(both, fx);
@@ -189,7 +164,8 @@ export function run(canvas: HTMLCanvasElement): boolean {
   }
   m2();
   m2Review(canvas);
-  return allPassed;
+  m3(canvas);
+  return passed();
 }
 
 /** Internals of the boss that a scene sets directly. */
@@ -205,7 +181,7 @@ function m2() {
   resetWorld();
   const match = new Match(scene, fx, null);
   const { boss, storm } = match;
-  const gigachad = 1.84 * PLAYER.scale;
+  const gigachad = PLAYER_KIT.height;
 
   // The boss is colossal: its model, measured, stands at least 15 times as tall as Gigachad.
   {
@@ -308,50 +284,67 @@ function m2() {
       `radius ${radii.join(', ')}; inside ${r(hpIn - inside.hp, 2)} damage, outside ${r(hpOut - outside.hp, 2)} in 1 s`);
   }
 
-  // Bots run from the storm and from the boss.
+  // Bots run from the storm and from the boss. Each runs under 6 fixed seeds and for a walker, a
+  // flyer and a roller; every run must pass. (They used to take whatever Math.random gave, and flaked.)
+  // Seed 6 starts them behind the stone wall and hay east of the village, so they have to find a
+  // way round; a ball takes longest there, about 5 s.
   {
-    match.start();
-    storm.update(STAGES[0].announce, 0);
-    match.time = STAGES[0].announce;
-    const bot = match.bots[0];
-    // 6 blocks outside the next circle, on open ground on whichever side still has island under it.
-    const far = storm.safeRadius + 6;
-    const clear = (x: number, z: number) => {
-      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (let y = 0; y < 4; y++) if (isSolid(Math.floor(x) + dx, y, Math.floor(z) + dz)) return false;
-      return true;
-    };
-    const a = [...Array(32).keys()].map((i) => (i / 32) * Math.PI * 2).find((t) => {
-      const x = storm.safeCenter.x + Math.cos(t) * far, z = storm.safeCenter.y + Math.sin(t) * far;
-      return Math.max(Math.abs(x), Math.abs(z)) < 30 && clear(x, z);
-    })!;
-    bot.f.respawn(new THREE.Vector3(storm.safeCenter.x + Math.cos(a) * far, 0.0001, storm.safeCenter.y + Math.sin(a) * far));
-    for (const o of match.bots.slice(1)) o.f.hide();
-    const d0 = Math.hypot(bot.f.pos.x - storm.safeCenter.x, bot.f.pos.z - storm.safeCenter.y);
-    for (let t = 0; t < 3; t += 1 / 60) runBots(match, 1 / 60);
-    const d1 = Math.hypot(bot.f.pos.x - storm.safeCenter.x, bot.f.pos.z - storm.safeCenter.y);
-    check('A bot outside the next circle heads into it', d0 > storm.safeRadius && d1 < storm.safeRadius - 1,
-      `distance to the next circle's centre ${r(d0, 1)} -> ${r(d1, 1)} in 3 s (its radius ${storm.safeRadius})`);
+    // The worst run for each kind of mover: the longest to get inside, the least far from the boss.
+    const slowest = new Map<string, { t: number; seed: number }>(), nearest = new Map<string, { d: number; seed: number; arms: boolean }>();
+    let inOk = true, awayOk = true;
+    for (const who of ['Doge', 'Nyan Cat', 'Orang'])
+      for (const seed of [1, 2, 3, 4, 5, 6])
+        seeded(seed, () => {
+          match.start([kit(who), ...['Pepe', 'Trollface'].map(kit)]);
+          storm.update(STAGES[0].announce, 0);
+          match.time = STAGES[0].announce;
+          const bot = match.bots.find((b) => b.f.name === who)!;
+          // 6 blocks outside the next circle, on open ground on whichever side still has island under it.
+          const far = storm.safeRadius + 6;
+          const clear = (x: number, z: number) => {
+            for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (let y = 0; y < 4; y++) if (isSolid(Math.floor(x) + dx, y, Math.floor(z) + dz)) return false;
+            return true;
+          };
+          const a = [...Array(32).keys()].map((i) => (i / 32) * Math.PI * 2).find((t) => {
+            const x = storm.safeCenter.x + Math.cos(t) * far, z = storm.safeCenter.y + Math.sin(t) * far;
+            return Math.max(Math.abs(x), Math.abs(z)) < 30 && clear(x, z);
+          })!;
+          bot.f.respawn(new THREE.Vector3(storm.safeCenter.x + Math.cos(a) * far, 0.0001, storm.safeCenter.y + Math.sin(a) * far));
+          for (const o of match.bots) if (o !== bot) o.f.hide();
+          const inside = () => Math.hypot(bot.f.pos.x - storm.safeCenter.x, bot.f.pos.z - storm.safeCenter.y) < storm.safeRadius - 1;
+          let t = 0;
+          for (; t < 6 && !inside(); t += 1 / 60) runBots(match, 1 / 60);
+          inOk &&= inside();
+          if (t >= (slowest.get(who)?.t ?? -1)) slowest.set(who, { t: inside() ? t : Infinity, seed });
 
-    storm.reset(); // the boss alone: nothing else to run from
-    boss.awaken(null);
-    boss.pos.set(0, 0, 0);
-    (boss as unknown as BossInside).phase = 'idle';
-    bot.f.respawn(new THREE.Vector3(14, 0.0001, 0));
-    let panicked = false;
-    for (let t = 0; t < 1.5; t += 1 / 60) {
-      runBots(match, 1 / 60);
-      panicked ||= bot.f.panic;
-    }
-    const away = Math.hypot(bot.f.pos.x, bot.f.pos.z);
-    check('A bot near the boss runs from it', away > 18 && panicked, `14 -> ${r(away, 1)} blocks from the boss in 1.5 s, arms up: ${panicked}`);
-    boss.reset();
+          storm.reset(); // the boss alone: nothing else to run from
+          boss.awaken(null);
+          boss.pos.set(0, 0, 0);
+          (boss as unknown as BossInside).phase = 'idle';
+          bot.f.respawn(new THREE.Vector3(14, 0.0001, 0));
+          let panicked = false;
+          for (let t = 0; t < 1.5; t += 1 / 60) {
+            runBots(match, 1 / 60);
+            panicked ||= bot.f.panic;
+          }
+          const gone = Math.hypot(bot.f.pos.x, bot.f.pos.z);
+          awayOk &&= gone > 18 && panicked;
+          if (gone <= (nearest.get(who)?.d ?? Infinity)) nearest.set(who, { d: gone, seed, arms: panicked });
+          boss.reset();
+        });
+    check('A bot 6 blocks outside the next circle gets inside it (18 seeded runs)', inOk,
+      `slowest of 6 seeds: ${[...slowest].map(([who, w]) => `${who} ${Number.isFinite(w.t) ? `${r(w.t, 1)} s` : 'not inside after 6 s'} (seed ${w.seed})`).join(', ')}`);
+    check('A bot near the boss runs from it (18 seeded runs)', awayOk,
+      `14 blocks from it, the least far each got in 1.5 s: ${[...nearest].map(([who, w]) => `${who} ${r(w.d, 1)} (seed ${w.seed}, arms up ${w.arms})`).join(', ')}`);
   }
 
   // Kill feed wording for every way out.
   {
-    const [a, v] = [match.bots[0].f, match.bots[1].f];
+    match.start(['Doge', 'Trollface'].map(kit));
+    const [a, v] = ['Doge', 'Trollface'].map((n) => match.bots.find((b) => b.f.name === n)!.f);
     const lines = [
-      [() => ((v.koHow = 'hit'), (v.koBy = a)), `Doge eliminated Trollface`],
+      [() => ((v.koHow = 'hit'), (v.koBy = a), (v.koVerb = null)), `Doge eliminated Trollface`],
+      [() => ((v.koHow = 'hit'), (v.koBy = a), (v.koVerb = 'bowled over')), `Doge bowled over Trollface`],
       [() => ((v.koHow = 'fall'), (v.koBy = a)), `Doge knocked Trollface off the island`],
       [() => ((v.koHow = 'fall'), (v.koBy = null)), `Trollface fell off the island`],
       [() => ((v.koHow = 'storm'), (v.koBy = null)), `The storm took Trollface`],
@@ -364,19 +357,20 @@ function m2() {
   // Whole matches with bots only, at 60 frames a second: how long they last and how they end.
   {
     const runs = 8, ends: number[] = [], how: Record<string, number> = {};
-    for (let i = 0; i < runs; i++) {
-      match.start();
-      let lines: string[] = [];
-      while (!match.result && match.time < 400) {
-        match.step(1 / 60, false);
-        lines = lines.concat(match.feed.splice(0).map((l) => l.text));
-      }
-      ends.push(match.time);
-      for (const l of lines) {
-        const kind = l.includes('storm took') ? 'storm' : l.includes('Skibidi') ? 'boss' : l.includes('fell off') || l.includes('off the island') ? 'fall' : l.includes('eliminated') ? 'fight' : null;
-        if (kind) how[kind] = (how[kind] ?? 0) + 1;
-      }
-    }
+    for (let i = 0; i < runs; i++)
+      seeded(100 + i, () => {
+        match.start(); // a random draw of bots, as in the game
+        let lines: string[] = [];
+        while (!match.result && match.time < 400) {
+          match.step(1 / 60, false);
+          lines = lines.concat(match.feed.splice(0).map((l) => l.text));
+        }
+        ends.push(match.time);
+        for (const l of lines) {
+          const kind = l.includes('storm took') ? 'storm' : l.includes('Skibidi') ? 'boss' : l.includes('fell off') || l.includes('off the island') ? 'fall' : l.includes('alliance') ? null : 'fight';
+          if (kind) how[kind] = (how[kind] ?? 0) + 1;
+        }
+      });
     ends.sort((x, y) => x - y);
     const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
     const median = ends[runs >> 1];
@@ -387,16 +381,17 @@ function m2() {
 
 /** The PR #7 review's reproductions, and the frozen result its triage asked for. */
 function m2Review(canvas: HTMLCanvasElement) {
-  const you = new Player(new Fighter(PLAYER, true, scene), canvas);
+  const you = new Player(new Fighter(PLAYER_KIT, true, scene), canvas);
   const match = new Match(scene, fx, you);
   const { boss, storm } = match;
   const b = boss as unknown as BossInside;
   const lastTwo = () => {
-    match.start();
-    const [bot, ...rest] = match.bots.map((x) => x.f);
-    for (const f of rest) {
-      f.out = true;
-      f.hide();
+    match.start(['Doge', 'Trollface', 'Pepe', 'Wojak', 'Udder Cow'].map(kit));
+    const bot = match.bots.find((x) => x.f.name === 'Doge')!.f;
+    for (const x of match.bots) {
+      if (x.f === bot) continue;
+      x.f.out = true;
+      x.f.hide();
     }
     return bot;
   };
@@ -577,9 +572,10 @@ function onScreen(root: THREE.Object3D, cam: THREE.PerspectiveCamera): number[] 
 /** Steps a match's bots and physics without the boss moving or the storm closing. */
 function runBots(match: Match, dt: number) {
   const hz = { boss: match.boss, storm: match.storm };
-  for (const b of match.bots) b.update(dt, match.fighters, 0, hz);
+  for (const b of match.bots) b.update(dt, match.arena, 0, hz);
   for (let i = 0; i < Math.round(dt / STEP); i++) {
     for (const f of match.fighters) if (f.root.visible) stepBody(f, fx);
     collideFighters(match.fighters, fx);
+    for (const f of match.fighters) if (f.root.visible) stepGear(f, match.arena);
   }
 }
